@@ -1,0 +1,98 @@
+use "std -> regex" from "regex"
+pub struct Validator is
+    pub kind: string
+    pub pattern: string
+    pub message: string
+    pub custom: fn(string) -> string
+end
+
+fn nop_validate(s: string) -> string is
+    return ""
+end
+
+pub fn validator_none() -> Validator is
+    return Validator { kind: "none", pattern: "", message: "", custom: nop_validate }
+end
+
+pub fn validator_nonempty(message: string) -> Validator is
+    return Validator { kind: "nonempty", pattern: "", message: message, custom: nop_validate }
+end
+
+pub fn validator_integer(message: string) -> Validator is
+    return Validator { kind: "integer", pattern: "", message: message, custom: nop_validate }
+end
+
+pub fn validator_number(message: string) -> Validator is
+    return Validator { kind: "number", pattern: "", message: message, custom: nop_validate }
+end
+
+pub fn validator_regex(pattern: string, message: string) -> Validator is
+    return Validator { kind: "regex", pattern: pattern, message: message, custom: nop_validate }
+end
+
+;; własna funkcja: zwraca "" gdy wejście poprawne, w przeciwnym razie komunikat błędu
+pub fn validator_custom(f: fn(string) -> string) -> Validator is
+    return Validator { kind: "custom", pattern: "", message: "", custom: f }
+end
+
+fn is_digits(s: string) -> bool is
+    let n: int = string_len(s)
+    if n == 0 is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_slice(s, i, i + 1)
+        if c < "0" || c > "9" is return false end
+        i += 1
+    end
+    return true
+end
+
+fn is_number(s0: string) -> bool is
+    let mut s: string = s0
+    if string_starts_with(s, "-") || string_starts_with(s, "+") is s = string_slice(s, 1, string_len(s)) end
+    let parts: [string] = string_split(s, ".")
+    if parts.len() == 1 is return is_digits(parts[0]) end
+    if parts.len() == 2 is
+        if parts[0] == "" is return is_digits(parts[1]) end
+        if parts[1] == "" is return is_digits(parts[0]) end
+        return is_digits(parts[0]) && is_digits(parts[1])
+    end
+    return false
+end
+
+;; "" = poprawne; inaczej komunikat błędu
+pub fn validate(v: Validator, text: string) -> string is
+    if v.kind == "none" is return "" end
+    if v.kind == "nonempty" is
+        if string_trim(text) == "" is
+            if v.message == "" is return "Input cannot be empty" end
+            return v.message
+        end
+        return ""
+    end
+    if v.kind == "integer" is
+        let mut t: string = text
+        if string_starts_with(t, "-") || string_starts_with(t, "+") is t = string_slice(t, 1, string_len(t)) end
+        if !is_digits(t) is
+            if v.message == "" is return "This input contains non-numeric characters" end
+            return v.message
+        end
+        return ""
+    end
+    if v.kind == "number" is
+        if !is_number(text) is
+            if v.message == "" is return "This is not a valid number" end
+            return v.message
+        end
+        return ""
+    end
+    if v.kind == "regex" is
+        if !regex::is_match(text, v.pattern) is
+            if v.message == "" is return "Invalid input" end
+            return v.message
+        end
+        return ""
+    end
+    if v.kind == "custom" is return v.custom(text) end
+    return ""
+end
