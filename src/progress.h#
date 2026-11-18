@@ -1,0 +1,99 @@
+mod utf8
+mod term
+mod style
+
+pub struct ProgressBar is
+    pub label: string
+    pub total: int
+    pub current: int
+    pub start_ms: int
+    pub width: int
+    pub tty: int
+    pub last_pct: int
+end
+
+pub fn progress_new(label: string, total: int) -> ProgressBar is
+    let t: term::Term = term::new_term()
+    let now: int = now_ms()
+    return ProgressBar { label: label, total: total, current: 0, start_ms: now, width: 30, tty: t.tty_out, last_pct: -1 }
+end
+
+fn two(n: int) -> string is
+    if n < 10 is return "0" + to_string(n) end
+    return to_string(n)
+end
+
+fn clock(secs: int) -> string is
+    return two(secs / 60) + ":" + two(secs % 60)
+end
+
+fn bar(pb: ProgressBar, frac100: int) -> string is
+    let eighths: int = pb.width * 8 * frac100 / 100
+    let full: int = eighths / 8
+    let rem: int = eighths % 8
+    let mut s: string = string_repeat("█", full)
+    let mut used: int = full
+    if rem > 0 && full < pb.width is
+        let parts: [string] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+        s = s + parts[rem]
+        used += 1
+    end
+    return s + utf8::spaces(pb.width - used)
+end
+
+fn line_for(pb: ProgressBar) -> string is
+    let mut pct: int = 100
+    if pb.total > 0 is pct = pb.current * 100 / pb.total end
+    if pct > 100 is pct = 100 end
+    let now: int = now_ms()
+    let el: int = (now - pb.start_ms) / 1000
+    let mut eta: string = "--:--"
+    let mut rate: string = ""
+    if pb.current > 0 && pb.total > 0 is
+        let ms: int = now - pb.start_ms
+        if ms > 0 is
+            let per10: int = pb.current * 10000 / ms
+            rate = ", " + to_string(per10 / 10) + "." + to_string(per10 % 10) + "it/s"
+            let remain: int = (pb.total - pb.current) * ms / pb.current / 1000
+            eta = clock(remain)
+        end
+    end
+    let depth: int = style::color_depth()
+    let st: style::Style = style::default_style()
+    let code: string = style::sgr(st, "class:progress-bar", depth)
+    let mut b: string = bar(pb, pct)
+    if code != "" is b = "\x1b[" + code + "m" + b + "\x1b[0m" end
+    let mut lead: string = ""
+    if pb.label != "" is lead = pb.label + " " end
+    return lead + utf8::pad(to_string(pct) + "%", 4) + "|" + b + "| " + to_string(pb.current) + "/" + to_string(pb.total) + " [" + clock(el) + "<" + eta + rate + "]"
+end
+
+pub fn progress_draw(pb: ProgressBar) is
+    if pb.tty == 0 is
+        let mut pct: int = 100
+        if pb.total > 0 is pct = pb.current * 100 / pb.total end
+        let step: int = pct / 25
+        if step != pb.last_pct is
+            pb.last_pct = step
+            term::out(pb.label + " " + to_string(pct) + "%\n")
+        end
+        return
+    end
+    term::out("\r\x1b[K" + line_for(pb))
+end
+
+pub fn progress_set(pb: ProgressBar, n: int) is
+    pb.current = n
+    progress_draw(pb)
+end
+
+pub fn progress_advance(pb: ProgressBar, n: int) is
+    pb.current += n
+    progress_draw(pb)
+end
+
+pub fn progress_finish(pb: ProgressBar) is
+    pb.current = pb.total
+    progress_draw(pb)
+    if pb.tty == 1 is term::out("\n") end
+end
