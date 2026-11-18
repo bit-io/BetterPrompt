@@ -10,4 +10,4 @@
 -> src => src
 
 [dependencies]
--> betterprompt => newest
+-> BetterPrompt => newest
