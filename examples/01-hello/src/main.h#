@@ -1,0 +1,13 @@
+use "bit -> BetterPrompt"
+
+fn main() is
+    let name: string = betterprompt::ask("Jak masz na imię? ")
+    betterprompt::print_html("Cześć, <b><ansigreen>" + betterprompt::html_escape(name) + "</ansigreen></b>!")
+    let pass: string = betterprompt::ask_password("Hasło: ")
+    println("Długość hasła: " + to_string(string_len(pass)))
+    if betterprompt::confirm("Kontynuować?", 1) is
+        println("Super.")
+    else is
+        println("Przerwano.")
+    end
+end
