@@ -1,0 +1,276 @@
+mod utf8
+mod term
+mod style
+mod buffer
+mod history
+mod validate
+mod lexer
+mod complete
+mod render
+mod vi
+mod session
+mod shortcuts
+mod progress
+mod dialogs
+
+
+pub fn version() -> string is
+    return "0.1.0"
+end
+
+;; ───────────────────────── Sesja i prompt ─────────────────────────
+
+pub fn new_session() -> session::PromptSession is
+    return session::new_session()
+end
+
+;; Czyta linię. Po zakończeniu: session_interrupted(s) (Ctrl-C) / session_eof(s) (Ctrl-D).
+pub fn prompt(s: session::PromptSession) -> string is
+    return session::prompt(s)
+end
+
+pub fn session_interrupted(s: session::PromptSession) -> bool is
+    return s.status == 1
+end
+
+pub fn session_eof(s: session::PromptSession) -> bool is
+    return s.status == 2
+end
+
+;; jednorazowy prompt bez historii: betterprompt::ask("Imię: ")
+pub fn ask(message: string) -> string is
+    let s: session::PromptSession = session::new_session()
+    session::set_message(s, message)
+    return session::prompt(s)
+end
+
+pub fn ask_password(message: string) -> string is
+    let s: session::PromptSession = session::new_session()
+    session::set_message(s, message)
+    s.is_password = 1
+    return session::prompt(s)
+end
+
+pub fn set_message(s: session::PromptSession, text: string) is
+    session::set_message(s, text)
+end
+
+;; komunikat z znacznikami: "<ansigreen>user</ansigreen><b>></b> "
+pub fn set_message_html(s: session::PromptSession, markup: string) is
+    session::set_message_html(s, markup)
+end
+
+pub fn set_bottom_toolbar_html(s: session::PromptSession, markup: string) is
+    s.toolbar_frags = style::html(markup)
+end
+
+;; toolbar liczony przy każdym odświeżeniu: funkcja dostaje bieżący tekst i zwraca znaczniki HTML
+pub fn set_bottom_toolbar_fn(s: session::PromptSession, f: fn(string) -> string) is
+    s.toolbar_fn = f
+    s.toolbar_dyn = 1
+end
+
+pub fn set_rprompt_html(s: session::PromptSession, markup: string) is
+    s.rprompt_frags = style::html(markup)
+end
+
+pub fn set_placeholder_html(s: session::PromptSession, markup: string) is
+    s.placeholder_frags = style::html(markup)
+end
+
+;; własny skrót: handler(buffer) zwraca 0 = nieobsłużone, 1 = obsłużone, 2 = akceptuj, 3 = przerwij, 4 = EOF
+pub fn add_binding(s: session::PromptSession, keys: string, handler: fn(buffer::Buffer) -> int) is
+    session::add_binding(s, keys, handler)
+end
+
+pub fn add_completer(s: session::PromptSession, c: complete::Completer) is
+    session::add_completer(s, c)
+end
+
+;; ───────────────────────── Bufor (dla własnych skrótów) ─────────────────────────
+
+pub fn buffer_insert(b: buffer::Buffer, text: string) is
+    buffer::insert(b, text)
+end
+
+pub fn buffer_set_text(b: buffer::Buffer, text: string, pos: int) is
+    buffer::set_text(b, text, pos)
+end
+
+pub fn buffer_delete_back(b: buffer::Buffer, n: int) is
+    buffer::delete_back(b, n)
+end
+
+;; ───────────────────────── Uzupełnianie ─────────────────────────
+
+pub fn words_completer(words: [string]) -> complete::Completer is
+    return complete::words_completer(words)
+end
+
+pub fn words_completer_meta(words: [string], metas: [string]) -> complete::Completer is
+    return complete::words_completer_meta(words, metas)
+end
+
+pub fn path_completer() -> complete::Completer is
+    return complete::path_completer()
+end
+
+pub fn fuzzy_completer(words: [string]) -> complete::Completer is
+    return complete::fuzzy_completer(words)
+end
+
+pub fn nested_completer(phrases: [string]) -> complete::Completer is
+    return complete::nested_completer(phrases)
+end
+
+pub fn custom_completer(f: fn(string) -> [string]) -> complete::Completer is
+    return complete::custom_completer(f)
+end
+
+;; ───────────────────────── Walidacja ─────────────────────────
+
+pub fn validator_none() -> validate::Validator is
+    return validate::validator_none()
+end
+
+pub fn validator_nonempty(message: string) -> validate::Validator is
+    return validate::validator_nonempty(message)
+end
+
+pub fn validator_integer(message: string) -> validate::Validator is
+    return validate::validator_integer(message)
+end
+
+pub fn validator_number(message: string) -> validate::Validator is
+    return validate::validator_number(message)
+end
+
+pub fn validator_regex(pattern: string, message: string) -> validate::Validator is
+    return validate::validator_regex(pattern, message)
+end
+
+pub fn validator_custom(f: fn(string) -> string) -> validate::Validator is
+    return validate::validator_custom(f)
+end
+
+;; ───────────────────────── Historia, lexer, styl ─────────────────────────
+
+pub fn new_history() -> history::History is
+    return history::new_history()
+end
+
+pub fn file_history(path: string) -> history::History is
+    return history::file_history(path)
+end
+
+pub fn history_append(h: history::History, text: string) is
+    history::history_append(h, text)
+end
+
+pub fn lexer_simple(keywords: [string], comment: string) -> lexer::Lexer is
+    return lexer::lexer_simple(keywords, comment)
+end
+
+pub fn new_style() -> style::Style is
+    return style::default_style()
+end
+
+;; style_add(st, "completion-menu.current", "bg:#00aaaa fg:black bold")
+pub fn style_add(st: style::Style, name: string, rule: string) is
+    style::style_add(st, name, rule)
+end
+
+pub fn html_fragments(markup: string) -> [style::Fragment] is
+    return style::html(markup)
+end
+
+pub fn ansi_fragments(text: string) -> [style::Fragment] is
+    return style::ansi(text)
+end
+
+pub fn html_escape(text: string) -> string is
+    return style::html_escape(text)
+end
+
+pub fn strip_ansi(text: string) -> string is
+    return style::strip_ansi(text)
+end
+
+;; ───────────────────────── Skróty (shortcuts) ─────────────────────────
+
+pub fn print_html(markup: string) is
+    shortcuts::print_html(markup)
+end
+
+pub fn print_html_style(markup: string, st: style::Style) is
+    shortcuts::print_html_style(markup, st)
+end
+
+pub fn print_ansi(text: string) is
+    shortcuts::print_ansi(text)
+end
+
+pub fn print_fragments(frags: [style::Fragment], st: style::Style) is
+    shortcuts::print_fragments(frags, st, "\n")
+end
+
+pub fn clear_screen() is
+    shortcuts::clear_screen()
+end
+
+pub fn set_title(title: string) is
+    shortcuts::set_title(title)
+end
+
+;; default: 1 = Enter oznacza Tak, 0 = Enter oznacza Nie, -1 = wymagane y/n
+pub fn confirm(message: string, default: int) -> bool is
+    return shortcuts::confirm(message, default)
+end
+
+pub fn choice(message: string, options: [string], default_idx: int) -> int is
+    return shortcuts::choice(message, options, default_idx)
+end
+
+;; ───────────────────────── Dialogi ─────────────────────────
+
+pub fn message_dialog(title: string, text: string, ok_label: string) is
+    dialogs::message_dialog(title, text, ok_label)
+end
+
+pub fn yes_no_dialog(title: string, text: string) -> bool is
+    return dialogs::yes_no_dialog(title, text)
+end
+
+pub fn button_dialog(title: string, text: string, labels: [string]) -> int is
+    return dialogs::button_dialog(title, text, labels)
+end
+
+pub fn input_dialog(title: string, text: string, password: int, initial: string) -> dialogs::DialogResult is
+    return dialogs::input_dialog(title, text, password, initial)
+end
+
+pub fn radiolist_dialog(title: string, text: string, values: [string], default_idx: int) -> int is
+    return dialogs::radiolist_dialog(title, text, values, default_idx)
+end
+
+pub fn checkboxlist_dialog(title: string, text: string, values: [string], defaults: [int]) -> dialogs::DialogResult is
+    return dialogs::checkboxlist_dialog(title, text, values, defaults)
+end
+
+;; ───────────────────────── Pasek postępu ─────────────────────────
+
+pub fn progress_new(label: string, total: int) -> progress::ProgressBar is
+    return progress::progress_new(label, total)
+end
+
+pub fn progress_set(pb: progress::ProgressBar, n: int) is
+    progress::progress_set(pb, n)
+end
+
+pub fn progress_advance(pb: progress::ProgressBar, n: int) is
+    progress::progress_advance(pb, n)
+end
+
+pub fn progress_finish(pb: progress::ProgressBar) is
+    progress::progress_finish(pb)
+end
