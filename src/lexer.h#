@@ -1,0 +1,91 @@
+mod utf8
+mod style
+
+pub struct Lexer is
+    pub kind: string
+    pub keywords: [string]
+    pub comment: string
+end
+
+pub fn lexer_none() -> Lexer is
+    return Lexer { kind: "none", keywords: [], comment: "" }
+end
+
+;; keywords: słowa podświetlane jako class:keyword; comment: prefiks komentarza do końca linii ("" = brak)
+pub fn lexer_simple(keywords: [string], comment: string) -> Lexer is
+    return Lexer { kind: "simple", keywords: keywords, comment: comment }
+end
+
+fn is_kw(lx: Lexer, w: string) -> bool is
+    let mut i: int = 0
+    while i < lx.keywords.len() is
+        if lx.keywords[i] == w is return true end
+        i += 1
+    end
+    return false
+end
+
+;; UWAGA: push na tablicy przekazanej jako parametr powoduje segfault w H# 0.9 — tablica żyje w strukturze
+struct Acc is
+    pub frags: [style::Fragment]
+end
+
+fn add(acc: Acc, st: string, text: string) is
+    let n: int = acc.frags.len()
+    if n > 0 && acc.frags[n - 1].style == st is
+        acc.frags[n - 1].text = acc.frags[n - 1].text + text
+    else is
+        acc.frags.push(style::frag(st, text))
+    end
+end
+
+pub fn lex(lx: Lexer, text: string) -> [style::Fragment] is
+    let out: Acc = Acc { frags: [] }
+    if lx.kind == "none" || text == "" is
+        out.frags.push(style::frag("", text))
+        return out.frags
+    end
+    let n: int = string_len(text)
+    let cl: int = string_len(lx.comment)
+    let mut i: int = 0
+    while i < n is
+        let b: int = utf8::bat(text, i)
+        if cl > 0 && string_slice(text, i, i + cl) == lx.comment is
+            let mut j: int = i
+            while j < n && utf8::bat(text, j) != 10 is
+                j += 1
+            end
+            add(out, "class:comment", string_slice(text, i, j))
+            i = j
+        else is
+            if b == 34 || b == 39 is
+                let mut j: int = i + 1
+                while j < n && utf8::bat(text, j) != b && utf8::bat(text, j) != 10 is
+                    j += 1
+                end
+                if j < n && utf8::bat(text, j) == b is j += 1 end
+                add(out, "class:string", string_slice(text, i, j))
+                i = j
+            else is
+                if utf8::is_word_cp(b) is
+                    let mut j: int = i
+                    while j < n && utf8::is_word_cp(utf8::cp_at(text, j)) is
+                        j = utf8::next(text, j)
+                    end
+                    let w: string = string_slice(text, i, j)
+                    if utf8::in_rng(b, 48, 57) is
+                        add(out, "class:number", w)
+                    else is
+                        if is_kw(lx, w) is add(out, "class:keyword", w) else is add(out, "", w) end
+                    end
+                    i = j
+                else is
+                    let e: int = utf8::next(text, i)
+                    add(out, "", string_slice(text, i, e))
+                    i = e
+                end
+            end
+        end
+    end
+    return out.frags
+end
