@@ -1,0 +1,1039 @@
+mod utf8
+mod term
+mod style
+mod buffer
+mod history
+mod validate
+mod lexer
+mod complete
+mod render
+mod vi
+
+pub struct KeyBinding is
+    pub keys: string
+    pub handler: fn(buffer::Buffer) -> int
+end
+
+pub struct PromptSession is
+    pub prompt_frags: [style::Fragment]
+    pub continuation: string
+    pub default_text: string
+    pub is_password: int
+    pub mask: string
+    pub multiline: int
+    pub vi_mode: int
+    pub complete_while_typing: int
+    pub complete_common: int
+    pub enable_history_search: int
+    pub auto_suggest: int
+    pub history: history::History
+    pub completers: [complete::Completer]
+    pub validator: validate::Validator
+    pub lexer: lexer::Lexer
+    pub style: style::Style
+    pub bindings: [KeyBinding]
+    pub toolbar_frags: [style::Fragment]
+    pub toolbar_fn: fn(string) -> string
+    pub toolbar_dyn: int
+    pub rprompt_frags: [style::Fragment]
+    pub placeholder_frags: [style::Fragment]
+    pub erase_when_done: int
+    pub bracketed_paste: int
+    pub menu_height: int
+    pub skip_dup_history: int
+    pub open_in_editor: int
+    pub cursor_shape: int
+    pub term: term::Term
+    pub buf: buffer::Buffer
+    pub vi: vi::ViState
+    pub status: int
+    pub comps: [complete::Completion]
+    pub comp_idx: int
+    pub comp_text: string
+    pub comp_pos: int
+    pub menu_top: int
+    pub hist_idx: int
+    pub hist_stash: string
+    pub hist_prefix: string
+    pub search_on: int
+    pub search_dir: int
+    pub search_q: string
+    pub search_orig: string
+    pub search_orig_pos: int
+    pub search_idx: int
+    pub search_fail: int
+    pub error: string
+    pub chord: string
+    pub rendered_row: int
+    pub depth: int
+    pub skip_refresh: int
+    pub shape_last: int
+end
+
+fn nop_toolbar(s: string) -> string is
+    return ""
+end
+
+pub fn new_session() -> PromptSession is
+    return PromptSession {
+        prompt_frags: [style::frag("class:prompt", "> ")],
+        continuation: "", default_text: "", is_password: 0, mask: "*", multiline: 0, vi_mode: 0,
+        complete_while_typing: 1, complete_common: 1, enable_history_search: 0, auto_suggest: 0,
+        history: history::new_history(), completers: [], validator: validate::validator_none(),
+        lexer: lexer::lexer_none(), style: style::default_style(), bindings: [],
+        toolbar_frags: [], toolbar_fn: nop_toolbar, toolbar_dyn: 0, rprompt_frags: [], placeholder_frags: [],
+        erase_when_done: 0, bracketed_paste: 1, menu_height: 8, skip_dup_history: 1, open_in_editor: 1, cursor_shape: 0,
+        term: term::new_term(), buf: buffer::new_buffer(""), vi: vi::new_vi(), status: 0,
+        comps: [], comp_idx: -1, comp_text: "", comp_pos: 0, menu_top: 0,
+        hist_idx: 0, hist_stash: "", hist_prefix: "",
+        search_on: 0, search_dir: -1, search_q: "", search_orig: "", search_orig_pos: 0, search_idx: 0, search_fail: 0,
+        error: "", chord: "", rendered_row: 0, depth: 4, skip_refresh: 0, shape_last: 0
+    }
+end
+
+pub fn add_binding(s: PromptSession, keys: string, handler: fn(buffer::Buffer) -> int) is
+    s.bindings.push(KeyBinding { keys: keys, handler: handler })
+end
+
+pub fn add_completer(s: PromptSession, c: complete::Completer) is
+    s.completers.push(c)
+end
+
+pub fn set_message(s: PromptSession, text: string) is
+    s.prompt_frags = [style::frag("class:prompt", text)]
+end
+
+pub fn set_message_html(s: PromptSession, markup: string) is
+    s.prompt_frags = style::html(markup)
+end
+
+;; --- pomocnicze -----------------------------------------------------------
+
+fn sg(s: PromptSession, spec: string) -> string is
+    return style::sgr(s.style, spec, s.depth)
+end
+
+fn put_frags(s: PromptSession, cv: render::Canvas, frags: [style::Fragment], extra: string) is
+    let mut i: int = 0
+    while i < frags.len() is
+        render::cv_text(cv, frags[i].text, sg(s, extra + " " + frags[i].style))
+        i += 1
+    end
+end
+
+fn last_line_width(frags: [style::Fragment]) -> int is
+    let p: string = style::plain(frags)
+    let idx: int = string_rfind(p, "\n")
+    if idx < 0 is return utf8::str_width(p) end
+    return utf8::str_width(string_slice(p, idx + 1, string_len(p)))
+end
+
+;; podpowiedź z historii: reszta najnowszego wpisu zaczynającego się od bieżącego tekstu
+fn suggestion(s: PromptSession) -> string is
+    if s.auto_suggest == 0 || s.buf.text == "" || string_contains(s.buf.text, "\n") is return "" end
+    let mut i: int = s.history.entries.len() - 1
+    while i >= 0 is
+        let e: string = s.history.entries[i]
+        if string_starts_with(e, s.buf.text) && e != s.buf.text is
+            return string_slice(e, string_len(s.buf.text), string_len(e))
+        end
+        i -= 1
+    end
+    return ""
+end
+
+;; --- menu uzupełniania ------------------------------------------------------
+
+fn menu_rows(s: PromptSession, cv: render::Canvas) -> [string] is
+    let width: int = cv.width
+    let n: int = s.comps.len()
+    let mut h: int = n
+    if h > s.menu_height is h = s.menu_height end
+    let avail: int = s.term.rows - cv.rows.len() - 2
+    if h > avail is h = avail end
+    if h < 1 is return [] end
+    if s.comp_idx >= 0 is
+        if s.comp_idx < s.menu_top is s.menu_top = s.comp_idx end
+        if s.comp_idx >= s.menu_top + h is s.menu_top = s.comp_idx - h + 1 end
+    end
+    if s.menu_top + h > n is s.menu_top = n - h end
+    if s.menu_top < 0 is s.menu_top = 0 end
+    let mut dmax: int = 4
+    let mut mmax: int = 0
+    let mut i: int = 0
+    while i < n is
+        let dw: int = utf8::str_width(s.comps[i].display)
+        if dw > dmax is dmax = dw end
+        let mw: int = utf8::str_width(s.comps[i].meta)
+        if mw > mmax is mmax = mw end
+        i += 1
+    end
+    let mut menuw: int = dmax + 2
+    if mmax > 0 is menuw = menuw + mmax + 2 end
+    if menuw > width - 1 is menuw = width - 1 end
+    ;; kotwica: kolumna początku uzupełnianego słowa
+    let mut wcols: int = 0
+    if s.comp_idx >= 0 is
+        wcols = utf8::str_width(s.comps[s.comp_idx].text)
+    else is
+        wcols = 0 - s.comps[0].start
+    end
+    let mut anchor: int = cv.ccol - wcols
+    if anchor < 0 is anchor = 0 end
+    if anchor + menuw > width is anchor = width - menuw end
+    if anchor < 0 is anchor = 0 end
+    let mut rows: [string] = []
+    let mut k: int = s.menu_top
+    while k < s.menu_top + h is
+        let c: complete::Completion = s.comps[k]
+        let mut cs: string = "class:completion-menu.completion"
+        let mut ms: string = "class:completion-menu.meta"
+        if k == s.comp_idx is
+            cs = "class:completion-menu.completion.current"
+            ms = "class:completion-menu.meta.current"
+        end
+        let dtxt: string = utf8::pad(" " + c.display, dmax + 2)
+        let mut line: string = ""
+        let c1: string = sg(s, cs)
+        if c1 != "" is line = "\x1b[" + c1 + "m" + dtxt + "\x1b[0m" else is line = dtxt end
+        if mmax > 0 is
+            let mtxt: string = utf8::pad(" " + c.meta, mmax + 2)
+            let c2: string = sg(s, ms)
+            if c2 != "" is line = line + "\x1b[" + c2 + "m" + mtxt + "\x1b[0m" else is line = line + mtxt end
+        end
+        rows.push(utf8::spaces(anchor) + line)
+        k += 1
+    end
+    return rows
+end
+
+;; --- budowanie obrazu ----------------------------------------------------------
+
+fn build(s: PromptSession, final: int) -> render::Canvas is
+    let width: int = s.term.cols
+    let cv: render::Canvas = render::cv_new(width)
+    put_frags(s, cv, s.prompt_frags, "")
+    let prow: int = cv.rows.len()
+    let pw: int = last_line_width(s.prompt_frags)
+    let text: string = s.buf.text
+    let pos: int = s.buf.pos
+    let mut lf: [style::Fragment] = []
+    if s.is_password == 1 is
+        lf = [style::frag("", text)]
+    else is
+        lf = lexer::lex(s.lexer, text)
+    end
+    let mut cont: string = s.continuation
+    if cont == "" is cont = utf8::spaces(pw) end
+    let mut bi: int = 0
+    let mut fi: int = 0
+    while fi < lf.len() is
+        let ft: string = lf[fi].text
+        let sgr: string = sg(s, lf[fi].style)
+        let fn_: int = string_len(ft)
+        let mut k: int = 0
+        while k < fn_ is
+            if bi == pos is render::cv_mark(cv) end
+            let e: int = utf8::next(ft, k)
+            let cp: int = utf8::cp_at(ft, k)
+            if cp == 10 is
+                render::cv_endrow(cv)
+                render::cv_text(cv, cont, sg(s, "class:continuation"))
+            elsif s.is_password == 1 is
+                render::cv_put(cv, s.mask, utf8::str_width(s.mask), "")
+            else is
+                render::cv_text(cv, string_slice(ft, k, e), sgr)
+            end
+            bi += e - k
+            k = e
+        end
+        fi += 1
+    end
+    render::cv_mark(cv)
+    if final == 0 is
+        if text == "" && s.placeholder_frags.len() > 0 is
+            put_frags(s, cv, s.placeholder_frags, "class:placeholder")
+        end
+        if s.search_on == 0 && pos == string_len(text) is
+            let sug: string = suggestion(s)
+            if sug != "" is render::cv_text(cv, sug, sg(s, "class:auto-suggestion")) end
+        end
+    end
+    render::cv_finish(cv)
+    ;; rprompt w wierszu pierwszej linii wejścia
+    if final == 0 && s.rprompt_frags.len() > 0 && prow < cv.rows.len() is
+        let rw: int = utf8::str_width(style::plain(s.rprompt_frags))
+        if cv.widths[prow] + rw + 1 <= width is
+            let rc: render::Canvas = render::cv_new(width + 1000)
+            put_frags(s, rc, s.rprompt_frags, "class:rprompt")
+            render::cv_finish(rc)
+            cv.rows[prow] = cv.rows[prow] + utf8::spaces(width - cv.widths[prow] - rw) + rc.rows[0]
+        end
+    end
+    if final == 1 is return cv end
+    if s.comps.len() > 0 is
+        let mr: [string] = menu_rows(s, cv)
+        let mut i: int = 0
+        while i < mr.len() is
+            cv.rows.push(mr[i])
+            i += 1
+        end
+    end
+    if s.search_on == 1 is
+        let mut lab: string = "(reverse-i-search)"
+        if s.search_dir == 1 is lab = "(i-search)" end
+        if s.search_fail == 1 is
+            lab = "(failed reverse-i-search)"
+            if s.search_dir == 1 is lab = "(failed i-search)" end
+        end
+        let sc: render::Canvas = render::cv_new(width)
+        render::cv_text(sc, lab + "`" + s.search_q + "': ", sg(s, "class:search"))
+        render::cv_finish(sc)
+        let mut j: int = 0
+        while j < sc.rows.len() is
+            cv.rows.push(sc.rows[j])
+            j += 1
+        end
+    end
+    if s.error != "" is
+        let ec: render::Canvas = render::cv_new(width)
+        render::cv_text(ec, s.error, sg(s, "class:validation-error"))
+        render::cv_finish(ec)
+        let mut j2: int = 0
+        while j2 < ec.rows.len() is
+            cv.rows.push(ec.rows[j2])
+            j2 += 1
+        end
+    end
+    let mut tb: [style::Fragment] = s.toolbar_frags
+    if s.toolbar_dyn == 1 is tb = style::html(s.toolbar_fn(s.buf.text)) end
+    if tb.len() > 0 is
+        let tc: render::Canvas = render::cv_new(width)
+        put_frags(s, tc, tb, "class:bottom-toolbar")
+        let fill: int = width - tc.col
+        if tc.rows.len() == 0 && fill > 0 is
+            render::cv_text(tc, utf8::spaces(fill), sg(s, "class:bottom-toolbar"))
+        end
+        render::cv_finish(tc)
+        let mut j3: int = 0
+        while j3 < tc.rows.len() is
+            cv.rows.push(tc.rows[j3])
+            j3 += 1
+        end
+    end
+    return cv
+end
+
+fn cursor_shape_seq(s: PromptSession) -> string is
+    if s.cursor_shape == 0 || s.vi_mode == 0 is return "" end
+    let want: int = 1
+    let mut w: int = want
+    if s.vi.mode == 1 is w = 2 end
+    if w == s.shape_last is return "" end
+    s.shape_last = w
+    if w == 2 is return "\x1b[2 q" end
+    return "\x1b[6 q"
+end
+
+fn up_seq(n: int) -> string is
+    if n <= 0 is return "" end
+    return "\x1b[" + to_string(n) + "A"
+end
+
+fn draw(s: PromptSession, final: int) is
+    let cv: render::Canvas = build(s, final)
+    let mut o: string = "\x1b[?25l" + up_seq(s.rendered_row) + "\r\x1b[J"
+    let mut i: int = 0
+    while i < cv.rows.len() is
+        if i > 0 is o = o + "\r\n" end
+        o = o + cv.rows[i]
+        i += 1
+    end
+    if final == 1 is
+        o = o + "\x1b[?25h"
+        term::out(o)
+        s.rendered_row = 0
+        return
+    end
+    let total: int = cv.rows.len()
+    o = o + up_seq(total - 1 - cv.crow) + "\r"
+    if cv.ccol > 0 is o = o + "\x1b[" + to_string(cv.ccol) + "C" end
+    o = o + cursor_shape_seq(s) + "\x1b[?25h"
+    s.rendered_row = cv.crow
+    term::out(o)
+end
+
+;; --- uzupełnianie -----------------------------------------------------------
+
+fn comp_clear(s: PromptSession) is
+    s.comps = []
+    s.comp_idx = -1
+    s.menu_top = 0
+end
+
+fn comp_refresh(s: PromptSession) is
+    let before: string = string_slice(s.buf.text, 0, s.buf.pos)
+    let mut all: [complete::Completion] = []
+    let mut i: int = 0
+    while i < s.completers.len() is
+        let got: [complete::Completion] = complete::get_completions(s.completers[i], before)
+        let mut k: int = 0
+        while k < got.len() is
+            let c: complete::Completion = got[k]
+            let typed: string = string_slice(before, string_len(before) + c.start, string_len(before))
+            if typed != c.text is all.push(c) end
+            k += 1
+        end
+        i += 1
+    end
+    s.comps = all
+    s.comp_idx = -1
+    s.comp_text = s.buf.text
+    s.comp_pos = s.buf.pos
+    s.menu_top = 0
+end
+
+fn comp_apply(s: PromptSession) is
+    let c: complete::Completion = s.comps[s.comp_idx]
+    let mut from: int = s.comp_pos + c.start
+    if from < 0 is from = 0 end
+    s.buf.text = string_slice(s.comp_text, 0, from) + c.text + string_slice(s.comp_text, s.comp_pos, string_len(s.comp_text))
+    s.buf.pos = from + string_len(c.text)
+end
+
+fn comp_cycle(s: PromptSession, dir: int) is
+    let n: int = s.comps.len()
+    if n == 0 is return end
+    if s.comp_idx < 0 is
+        if dir == 1 is s.comp_idx = 0 else is s.comp_idx = n - 1 end
+    else is
+        s.comp_idx = (s.comp_idx + dir + n) % n
+    end
+    comp_apply(s)
+end
+
+fn comp_cancel(s: PromptSession) is
+    if s.comp_idx >= 0 is
+        s.buf.text = s.comp_text
+        s.buf.pos = s.comp_pos
+    end
+    comp_clear(s)
+end
+
+fn tab_complete(s: PromptSession, dir: int) is
+    if s.comps.len() == 0 is comp_refresh(s) end
+    let n: int = s.comps.len()
+    if n == 0 is return end
+    if n == 1 && s.comp_idx < 0 is
+        buffer::snapshot(s.buf)
+        s.comp_idx = 0
+        comp_apply(s)
+        comp_clear(s)
+        return
+    end
+    if s.comp_idx < 0 && s.complete_common == 1 && dir == 1 is
+        let cp: string = complete::common_prefix(s.comps)
+        let typedlen: int = 0 - s.comps[0].start
+        if string_len(cp) > typedlen is
+            buffer::snapshot(s.buf)
+            let from: int = s.buf.pos + s.comps[0].start
+            s.buf.text = string_slice(s.buf.text, 0, from) + cp + string_slice(s.buf.text, s.buf.pos, string_len(s.buf.text))
+            s.buf.pos = from + string_len(cp)
+            comp_refresh(s)
+            return
+        end
+    end
+    comp_cycle(s, dir)
+end
+
+;; --- historia ---------------------------------------------------------------
+
+fn hist_up(s: PromptSession) is
+    let n: int = s.history.entries.len()
+    if s.hist_idx >= n is
+        s.hist_stash = s.buf.text
+        s.hist_prefix = ""
+        if s.enable_history_search == 1 is s.hist_prefix = string_slice(s.buf.text, 0, s.buf.pos) end
+        s.hist_idx = n
+    end
+    let mut i: int = s.hist_idx - 1
+    while i >= 0 is
+        if string_starts_with(s.history.entries[i], s.hist_prefix) is
+            s.hist_idx = i
+            s.buf.text = s.history.entries[i]
+            s.buf.pos = string_len(s.buf.text)
+            return
+        end
+        i -= 1
+    end
+end
+
+fn hist_down(s: PromptSession) is
+    let n: int = s.history.entries.len()
+    if s.hist_idx >= n is return end
+    let mut i: int = s.hist_idx + 1
+    while i < n is
+        if string_starts_with(s.history.entries[i], s.hist_prefix) is
+            s.hist_idx = i
+            s.buf.text = s.history.entries[i]
+            s.buf.pos = string_len(s.buf.text)
+            return
+        end
+        i += 1
+    end
+    s.hist_idx = n
+    s.buf.text = s.hist_stash
+    s.buf.pos = string_len(s.buf.text)
+end
+
+fn hist_first(s: PromptSession) is
+    let n: int = s.history.entries.len()
+    if n == 0 is return end
+    if s.hist_idx >= n is s.hist_stash = s.buf.text end
+    s.hist_prefix = ""
+    s.hist_idx = 0
+    s.buf.text = s.history.entries[0]
+    s.buf.pos = string_len(s.buf.text)
+end
+
+fn hist_last(s: PromptSession) is
+    let n: int = s.history.entries.len()
+    s.hist_idx = n
+    s.buf.text = s.hist_stash
+    s.buf.pos = string_len(s.buf.text)
+end
+
+;; --- wyszukiwanie przyrostowe -----------------------------------------------
+
+fn search_find(s: PromptSession, from: int, dir: int) -> int is
+    let n: int = s.history.entries.len()
+    let mut i: int = from
+    while i >= 0 && i < n is
+        if string_contains(s.history.entries[i], s.search_q) is return i end
+        i += dir
+    end
+    return -1
+end
+
+fn search_show(s: PromptSession, idx: int) is
+    if idx < 0 is
+        s.search_fail = 1
+        return
+    end
+    s.search_fail = 0
+    s.search_idx = idx
+    s.buf.text = s.history.entries[idx]
+    let at: int = string_find(s.buf.text, s.search_q)
+    if at >= 0 is s.buf.pos = at else is s.buf.pos = string_len(s.buf.text) end
+end
+
+fn search_start(s: PromptSession, dir: int) is
+    comp_clear(s)
+    s.search_on = 1
+    s.search_dir = dir
+    s.search_q = ""
+    s.search_orig = s.buf.text
+    s.search_orig_pos = s.buf.pos
+    s.search_idx = s.history.entries.len()
+    s.search_fail = 0
+end
+
+fn search_end(s: PromptSession, keep: int) is
+    if keep == 0 is
+        s.buf.text = s.search_orig
+        s.buf.pos = s.search_orig_pos
+    else is
+        s.hist_idx = s.history.entries.len()
+    end
+    s.search_on = 0
+    s.search_q = ""
+end
+
+fn is_printable(key: string) -> bool is
+    if utf8::char_count(key) != 1 is return false end
+    let cp: int = utf8::cp_at(key, 0)
+    return cp >= 32 && cp != 127
+end
+
+;; zwraca -1 gdy klawisz ma być obsłużony normalnie po wyjściu z wyszukiwania
+fn search_key(s: PromptSession, key: string) -> int is
+    if key == "c-r" || key == "c-s" is
+        let mut dir: int = -1
+        if key == "c-s" is dir = 1 end
+        s.search_dir = dir
+        let mut from: int = s.search_idx + dir
+        if s.search_idx >= s.history.entries.len() is from = s.history.entries.len() - 1 end
+        search_show(s, search_find(s, from, dir))
+        return 0
+    end
+    if key == "backspace" || key == "c-h" is
+        if s.search_q != "" is
+            s.search_q = string_slice(s.search_q, 0, utf8::prev(s.search_q, string_len(s.search_q)))
+        end
+        let mut from2: int = s.search_idx
+        if from2 >= s.history.entries.len() is from2 = s.history.entries.len() - 1 end
+        search_show(s, search_find(s, from2, s.search_dir))
+        return 0
+    end
+    if is_printable(key) is
+        s.search_q = s.search_q + key
+        let mut from3: int = s.search_idx
+        if from3 >= s.history.entries.len() is from3 = s.history.entries.len() - 1 end
+        search_show(s, search_find(s, from3, s.search_dir))
+        return 0
+    end
+    if key == "enter" || key == "c-j" is
+        search_end(s, 1)
+        return 0
+    end
+    if key == "escape" || key == "c-g" || key == "c-c" is
+        search_end(s, 0)
+        return 0
+    end
+    search_end(s, 1)
+    return -1
+end
+
+;; --- akceptacja i edytor --------------------------------------------------------
+
+fn accept_line(s: PromptSession) -> int is
+    comp_clear(s)
+    let err: string = validate::validate(s.validator, s.buf.text)
+    if err != "" is
+        s.error = err
+        return 0
+    end
+    return 1
+end
+
+fn open_editor(s: PromptSession) -> int is
+    let up: string = up_seq(s.rendered_row)
+    term::out(up + "\r\x1b[J\x1b[?2004l")
+    s.rendered_row = 0
+    let tmp: string = "/tmp/betterprompt-edit-" + to_string(now_ms()) + ".txt"
+    write_file(tmp, s.buf.text)
+    let mut ed: string = env_get("VISUAL")
+    if ed == "" is ed = env_get("EDITOR") end
+    if ed == "" is ed = "vi" end
+    term::leave_raw(s.term)
+    term::run_interactive(ed + " " + tmp)
+    term::enter_raw(s.term)
+    let mut txt: string = read_file(tmp)
+    shell("rm -f " + tmp)
+    if string_ends_with(txt, "\n") is txt = string_slice(txt, 0, string_len(txt) - 1) end
+    s.buf.text = txt
+    s.buf.pos = string_len(txt)
+    if s.bracketed_paste == 1 is term::out("\x1b[?2004h") end
+    return accept_line(s)
+end
+
+;; --- klawisze Emacs -------------------------------------------------------------
+
+fn insert_paste(s: PromptSession) is
+    let mut p: string = string_replace(s.term.paste, "\r\n", "\n")
+    p = string_replace(p, "\r", "\n")
+    p = string_replace(p, "\t", "    ")
+    if s.multiline == 0 is p = string_replace(p, "\n", " ") end
+    buffer::snapshot(s.buf)
+    s.buf.prev_op = ""
+    buffer::insert(s.buf, p)
+    s.buf.last_op = "paste"
+end
+
+;; 0 dalej, 1 akceptuj, 2 przerwij, 3 EOF
+fn emacs_key(s: PromptSession, key: string) -> int is
+    let b: buffer::Buffer = s.buf
+    if key == "enter" || key == "c-j" is
+        if s.multiline == 1 is
+            buffer::insert(b, "\n")
+            return 0
+        end
+        return accept_line(s)
+    end
+    if key == "m-enter" is return accept_line(s) end
+    if key == "c-c" is return 2 end
+    if key == "c-d" is
+        if b.text == "" is return 3 end
+        buffer::delete_fwd(b, 1)
+        return 0
+    end
+    if key == "c-a" || key == "home" is
+        buffer::home(b)
+        return 0
+    end
+    if key == "c-e" || key == "end" is
+        if b.pos == string_len(b.text) && key == "c-e" is
+            let sg1: string = suggestion(s)
+            if sg1 != "" is
+                buffer::insert(b, sg1)
+                return 0
+            end
+        end
+        buffer::end_of_line(b)
+        return 0
+    end
+    if key == "c-b" || key == "left" is
+        buffer::left(b, 1)
+        return 0
+    end
+    if key == "c-f" || key == "right" is
+        if b.pos == string_len(b.text) is
+            let sg2: string = suggestion(s)
+            if sg2 != "" is
+                buffer::insert(b, sg2)
+                return 0
+            end
+        end
+        buffer::right(b, 1)
+        return 0
+    end
+    if key == "c-left" || key == "m-b" is
+        buffer::word_back(b)
+        return 0
+    end
+    if key == "c-right" || key == "m-f" is
+        if b.pos == string_len(b.text) is
+            let sg3: string = suggestion(s)
+            if sg3 != "" is
+                let e: int = buffer::word_end_fwd(sg3, 0)
+                buffer::insert(b, string_slice(sg3, 0, e))
+                return 0
+            end
+        end
+        buffer::word_fwd(b)
+        return 0
+    end
+    if key == "backspace" || key == "c-h" is
+        buffer::delete_back(b, 1)
+        return 0
+    end
+    if key == "delete" is
+        buffer::delete_fwd(b, 1)
+        return 0
+    end
+    if key == "c-k" is
+        buffer::kill_to_eol(b)
+        return 0
+    end
+    if key == "c-u" is
+        buffer::kill_to_bol(b)
+        return 0
+    end
+    if key == "c-w" is
+        buffer::kill_bigword_back(b)
+        return 0
+    end
+    if key == "m-d" is
+        buffer::kill_word_fwd(b)
+        return 0
+    end
+    if key == "m-backspace" is
+        buffer::kill_word_back(b)
+        return 0
+    end
+    if key == "c-y" is
+        buffer::yank(b)
+        return 0
+    end
+    if key == "m-y" is
+        buffer::yank_pop(b)
+        return 0
+    end
+    if key == "c-t" is
+        buffer::transpose_chars(b)
+        return 0
+    end
+    if key == "m-u" is
+        buffer::case_word(b, 0)
+        return 0
+    end
+    if key == "m-l" is
+        buffer::case_word(b, 1)
+        return 0
+    end
+    if key == "m-c" is
+        buffer::case_word(b, 2)
+        return 0
+    end
+    if key == "c-_" || key == "c-z" is
+        buffer::undo(b)
+        return 0
+    end
+    if key == "up" || key == "c-p" is
+        if buffer::up(b) == 0 is
+            hist_up(s)
+            s.skip_refresh = 1
+        end
+        return 0
+    end
+    if key == "down" || key == "c-n" is
+        if buffer::down(b) == 0 is
+            hist_down(s)
+            s.skip_refresh = 1
+        end
+        return 0
+    end
+    if key == "pageup" || key == "m-<" is
+        hist_first(s)
+        s.skip_refresh = 1
+        return 0
+    end
+    if key == "pagedown" || key == "m->" is
+        hist_last(s)
+        s.skip_refresh = 1
+        return 0
+    end
+    if key == "c-l" is
+        term::out("\x1b[2J\x1b[H")
+        s.rendered_row = 0
+        return 0
+    end
+    if key == "c-r" is
+        search_start(s, -1)
+        return 0
+    end
+    if key == "c-s" is
+        search_start(s, 1)
+        return 0
+    end
+    if key == "m-." is
+        let n: int = s.history.entries.len()
+        if n > 0 is buffer::insert(b, buffer::last_arg(s.history.entries[n - 1])) end
+        return 0
+    end
+    if key == "paste" is
+        insert_paste(s)
+        return 0
+    end
+    if is_printable(key) is
+        buffer::insert(b, key)
+        return 0
+    end
+    return 0
+end
+
+;; własne skróty: 1 = obsłużono (dalej), 2/3/4 = akceptuj/przerwij/EOF -> kody 1/2/3; -1 = nieobsłużone
+fn custom_key(s: PromptSession, key: string) -> int is
+    let mut i: int = 0
+    while i < s.bindings.len() is
+        if s.bindings[i].keys == key is
+            let r: int = s.bindings[i].handler(s.buf)
+            if r == 1 is return 0 end
+            if r == 2 is return accept_line(s) end
+            if r == 3 is return 2 end
+            if r == 4 is return 3 end
+        end
+        i += 1
+    end
+    return -1
+end
+
+fn dispatch(s: PromptSession, key0: string) -> int is
+    let mut key: string = key0
+    ;; wyszukiwanie
+    if s.search_on == 1 is
+        let r: int = search_key(s, key)
+        s.skip_refresh = 1
+        if r >= 0 is return 0 end
+    end
+    ;; chord c-x
+    if s.chord != "" is
+        key = s.chord + " " + key
+        s.chord = ""
+        let cr: int = custom_key(s, key)
+        if cr >= 0 is return cr end
+        if key == "c-x c-e" && s.open_in_editor == 1 is return open_editor(s) end
+        if key == "c-x c-u" is
+            buffer::undo(s.buf)
+        end
+        return 0
+    end
+    if key == "c-x" is
+        s.chord = "c-x"
+        s.skip_refresh = 1
+        return 0
+    end
+    let cr2: int = custom_key(s, key)
+    if cr2 >= 0 is return cr2 end
+    ;; menu uzupełniania
+    let menu: bool = s.comps.len() > 0
+    if key == "tab" is
+        tab_complete(s, 1)
+        s.skip_refresh = 1
+        return 0
+    end
+    if menu is
+        if key == "s-tab" is
+            comp_cycle(s, -1)
+            s.skip_refresh = 1
+            return 0
+        end
+        if key == "down" || key == "c-n" is
+            comp_cycle(s, 1)
+            s.skip_refresh = 1
+            return 0
+        end
+        if key == "up" || key == "c-p" is
+            comp_cycle(s, -1)
+            s.skip_refresh = 1
+            return 0
+        end
+        if key == "escape" is
+            comp_cancel(s)
+            s.skip_refresh = 1
+            return 0
+        end
+        if s.comp_idx >= 0 && key == "right" is
+            comp_clear(s)
+            s.skip_refresh = 1
+            return 0
+        end
+        comp_clear(s)
+    end
+    if key == "s-tab" is return 0 end
+    ;; Vi
+    if s.vi_mode == 1 is
+        if s.vi.mode == 1 is
+            let r2: int = vi::normal_key(s.vi, s.buf, key)
+            if r2 == 0 is return 0 end
+            if r2 == 1 is return accept_line(s) end
+            if r2 == 2 is return 2 end
+            if r2 == 3 is return 3 end
+            if r2 == 4 is
+                search_start(s, -1)
+                return 0
+            end
+            if r2 == 6 is
+                hist_up(s)
+                s.skip_refresh = 1
+                return 0
+            end
+            if r2 == 7 is
+                hist_down(s)
+                s.skip_refresh = 1
+                return 0
+            end
+            if key == "enter" is return accept_line(s) end
+            return emacs_key(s, key)
+        end
+        if key == "escape" is
+            s.vi.mode = 1
+            s.vi.op = ""
+            s.vi.wait = ""
+            s.vi.count = ""
+            vi::clamp(s.buf)
+            if s.buf.pos > buffer::line_start(s.buf.text, s.buf.pos) is
+                buffer::left(s.buf, 1)
+            end
+            return 0
+        end
+    end
+    return emacs_key(s, key)
+end
+
+;; 0 dalej, 1 akceptuj, 2 przerwij, 3 EOF
+fn handle_key(s: PromptSession, key: string) -> int is
+    let old_text: string = s.buf.text
+    let old_pos: int = s.buf.pos
+    let was_search: int = s.search_on
+    buffer::begin_key(s.buf)
+    s.skip_refresh = 0
+    if key != "enter" && key != "tab" && key != "paste" && s.error != "" is s.error = "" end
+    let r: int = dispatch(s, key)
+    if r != 0 is return r end
+    if s.skip_refresh == 1 is return 0 end
+    if s.buf.text != old_text is
+        if s.hist_idx != s.history.entries.len() && was_search == 0 is s.hist_idx = s.history.entries.len() end
+        if s.complete_while_typing == 1 && s.buf.text != "" && s.completers.len() > 0 && s.search_on == 0 is
+            comp_refresh(s)
+        else is
+            comp_clear(s)
+        end
+    elsif s.buf.pos != old_pos is
+        comp_clear(s)
+    end
+    return 0
+end
+
+;; --- główna funkcja --------------------------------------------------------------
+
+fn plain_prompt(s: PromptSession) -> string is
+    term::out(style::plain(s.prompt_frags))
+    let line: string = term::read_plain_line(s.term)
+    if s.term.eof == 1 is
+        s.status = 2
+        return ""
+    end
+    if line != "" && (s.skip_dup_history == 0 || s.history.entries.len() == 0 || s.history.entries[s.history.entries.len() - 1] != line) is
+        history::history_append(s.history, line)
+    end
+    return line
+end
+
+;; Czyta jedną linię. s.status: 0 = OK, 1 = Ctrl-C, 2 = Ctrl-D/EOF.
+pub fn prompt(s: PromptSession) -> string is
+    s.status = 0
+    let t: term::Term = s.term
+    if t.tty_in == 0 is return plain_prompt(s) end
+    term::refresh_size(t)
+    s.depth = style::color_depth()
+    s.buf = buffer::new_buffer(s.default_text)
+    s.vi = vi::new_vi()
+    s.vi.mode = 0
+    comp_clear(s)
+    s.hist_idx = s.history.entries.len()
+    s.hist_stash = ""
+    s.hist_prefix = ""
+    s.search_on = 0
+    s.error = ""
+    s.chord = ""
+    s.rendered_row = 0
+    s.shape_last = 0
+    term::enter_raw(t)
+    if s.bracketed_paste == 1 is term::out("\x1b[?2004h") end
+    draw(s, 0)
+    let mut result: int = 0
+    while result == 0 is
+        let key: string = term::read_key(t)
+        if key == "" is
+            let oc: int = t.cols
+            term::refresh_size(t)
+            if t.cols > oc is
+                draw(s, 0)
+            elsif t.cols < oc is
+                s.rendered_row = 0
+                term::out("\r\n")
+                draw(s, 0)
+            end
+        else is
+            term::refresh_size(t)
+            result = handle_key(s, key)
+            if result == 0 is draw(s, 0) end
+        end
+    end
+    comp_clear(s)
+    s.search_on = 0
+    s.error = ""
+    let text: string = s.buf.text
+    if s.erase_when_done == 1 is
+        term::out("\x1b[?25l" + up_seq(s.rendered_row) + "\r\x1b[J\x1b[?25h")
+    else is
+        draw(s, 1)
+        term::out("\r\n")
+    end
+    if s.bracketed_paste == 1 is term::out("\x1b[?2004l") end
+    if s.cursor_shape == 1 && s.vi_mode == 1 is term::out("\x1b[0 q") end
+    term::leave_raw(t)
+    if result == 2 is
+        s.status = 1
+        return ""
+    end
+    if result == 3 is
+        s.status = 2
+        return ""
+    end
+    if text != "" && (s.skip_dup_history == 0 || s.history.entries.len() == 0 || s.history.entries[s.history.entries.len() - 1] != text) is
+        history::history_append(s.history, text)
+    end
+    return text
+end
