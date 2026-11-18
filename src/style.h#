@@ -1,0 +1,525 @@
+mod utf8
+
+const C255: int = 255
+const C256: int = 256
+const C231: int = 231
+const C232: int = 232
+const C247: int = 247
+const C248: int = 248
+
+pub struct Fragment is
+    pub style: string
+    pub text: string
+end
+
+pub fn frag(style: string, text: string) -> Fragment is
+    return Fragment { style: style, text: text }
+end
+
+pub struct Style is
+    pub names: [string]
+    pub rules: [string]
+end
+
+pub fn new_style() -> Style is
+    return Style { names: [], rules: [] }
+end
+
+;; dodaje/nadpisuje regułę, np. style_add(st, "completion-menu.current", "bg:#00aaaa fg:black bold")
+pub fn style_add(st: Style, name: string, rule: string) is
+    let mut i: int = 0
+    while i < st.names.len() is
+        if st.names[i] == name is
+            st.rules[i] = rule
+            return
+        end
+        i += 1
+    end
+    st.names.push(name)
+    st.rules.push(rule)
+end
+
+;; styl domyślny (odpowiednik domyślnego stylu prompt_toolkit)
+pub fn default_style() -> Style is
+    let st: Style = new_style()
+    style_add(st, "completion-menu", "bg:#008888 fg:#ffffff")
+    style_add(st, "completion-menu.completion", "bg:#008888 fg:#ffffff")
+    style_add(st, "completion-menu.completion.current", "bg:#00aaaa fg:#000000")
+    style_add(st, "completion-menu.meta", "bg:#448888 fg:#ffffff")
+    style_add(st, "completion-menu.meta.current", "bg:#00aaaa fg:#000000")
+    style_add(st, "bottom-toolbar", "reverse")
+    style_add(st, "validation-error", "fg:ansired bold")
+    style_add(st, "auto-suggestion", "fg:ansibrightblack")
+    style_add(st, "placeholder", "fg:ansibrightblack")
+    style_add(st, "search", "fg:ansicyan")
+    style_add(st, "rprompt", "")
+    style_add(st, "keyword", "fg:ansiyellow bold")
+    style_add(st, "number", "fg:ansimagenta")
+    style_add(st, "string", "fg:ansigreen")
+    style_add(st, "comment", "fg:ansibrightblack italic")
+    style_add(st, "operator", "fg:ansicyan")
+    style_add(st, "dialog", "bg:#4444aa")
+    style_add(st, "dialog.body", "bg:#ffffff fg:#000000")
+    style_add(st, "dialog.title", "bg:#ffffff fg:#4444aa bold")
+    style_add(st, "button", "")
+    style_add(st, "button.focused", "bg:#aa0000 fg:#ffffff")
+    style_add(st, "radio-selected", "fg:#cc0000")
+    style_add(st, "progress-bar", "bg:#00aa00")
+    style_add(st, "progress-bar.done", "bg:#00aa00 fg:#ffffff")
+    style_add(st, "choice.selected", "fg:ansicyan bold")
+    return st
+end
+
+;; styl użytkownika nałożony na domyślny
+pub fn merged_style(user: Style) -> Style is
+    let st: Style = default_style()
+    let mut i: int = 0
+    while i < user.names.len() is
+        style_add(st, user.names[i], user.rules[i])
+        i += 1
+    end
+    return st
+end
+
+fn rule_for(st: Style, name: string) -> string is
+    let mut i: int = 0
+    while i < st.names.len() is
+        if st.names[i] == name is return st.rules[i] end
+        i += 1
+    end
+    return ""
+end
+
+;; rozwija class:a.b,c do samych atrybutów (a, a.b kumulują się)
+fn expand_class(st: Style, cls: string, depth: int) -> string is
+    if depth > 6 is return "" end
+    let parts: [string] = string_split(cls, ".")
+    let mut acc: string = ""
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < parts.len() is
+        if i == 0 is acc = parts[0] else is acc = acc + "." + parts[i] end
+        let rule: string = rule_for(st, acc)
+        if rule != "" is out = out + " " + resolve_style(st, rule, depth + 1) end
+        i += 1
+    end
+    return out
+end
+
+pub fn resolve_style(st: Style, spec: string, depth: int) -> string is
+    if spec == "" is return "" end
+    let toks: [string] = string_split(spec, " ")
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < toks.len() is
+        let t: string = toks[i]
+        if t != "" is
+            if string_starts_with(t, "class:") is
+                let names: [string] = string_split(string_slice(t, 6, string_len(t)), ",")
+                let mut k: int = 0
+                while k < names.len() is
+                    out = out + " " + expand_class(st, names[k], depth)
+                    k += 1
+                end
+            else is
+                out = out + " " + t
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; --- kolory -------------------------------------------------------------
+
+pub fn color_depth() -> int is
+    let force: string = env_get("BETTERPROMPT_COLOR_DEPTH")
+    if force != "" is return to_int(force) end
+    if env_get("NO_COLOR") != "" is return 1 end
+    let term: string = env_get("TERM")
+    if term == "dumb" is return 1 end
+    let ct: string = env_get("COLORTERM")
+    if ct == "truecolor" || ct == "24bit" is return 24 end
+    if string_contains(term, "256") is return 8 end
+    if term == "" is return 4 end
+    return 4
+end
+
+fn hexval(c: string) -> int is
+    if c == "0" is return 0 end
+    if c == "1" is return 1 end
+    if c == "2" is return 2 end
+    if c == "3" is return 3 end
+    if c == "4" is return 4 end
+    if c == "5" is return 5 end
+    if c == "6" is return 6 end
+    if c == "7" is return 7 end
+    if c == "8" is return 8 end
+    if c == "9" is return 9 end
+    if c == "a" || c == "A" is return 10 end
+    if c == "b" || c == "B" is return 11 end
+    if c == "c" || c == "C" is return 12 end
+    if c == "d" || c == "D" is return 13 end
+    if c == "e" || c == "E" is return 14 end
+    if c == "f" || c == "F" is return 15 end
+    return 0
+end
+
+fn hex2(s: string, i: int) -> int is
+    return hexval(string_slice(s, i, i + 1)) * 16 + hexval(string_slice(s, i + 1, i + 2))
+end
+
+;; paleta 16 kolorów ANSI (xterm) jako hex — unika literałów >= 128
+fn palette() -> string is
+    return "000000cd0000" + "00cd00cdcd00" + "0000ee" + "cd00cd" + "00cdcd" + "e5e5e5" + "7f7f7f" + "ff0000" + "00ff00" + "ffff00" + "5c5cff" + "ff00ff" + "00ffff" + "ffffff"
+end
+
+fn nearest16(r: int, g: int, b: int) -> int is
+    let pal: string = palette()
+    let mut best: int = 0
+    let mut bd: int = 999999999
+    let mut i: int = 0
+    while i < 16 is
+        let pr: int = hex2(pal, i * 6)
+        let pg: int = hex2(pal, i * 6 + 2)
+        let pb: int = hex2(pal, i * 6 + 4)
+        let d: int = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (b - pb) * (b - pb)
+        if d < bd is
+            bd = d
+            best = i
+        end
+        i += 1
+    end
+    return best
+end
+
+fn to256(r: int, g: int, b: int) -> int is
+    if r == g && g == b is
+        if r < 8 is return 16 end
+        if r > C248 is return C231 end
+        return C232 + (r - 8) * 24 / C247
+    end
+    let rr: int = (r * 5 + 127) / C255
+    let gg: int = (g * 5 + 127) / C255
+    let bb: int = (b * 5 + 127) / C255
+    return 16 + 36 * rr + 6 * gg + bb
+end
+
+fn ansi_index(name: string) -> int is
+    if name == "ansiblack" is return 0 end
+    if name == "ansired" is return 1 end
+    if name == "ansigreen" is return 2 end
+    if name == "ansiyellow" is return 3 end
+    if name == "ansiblue" is return 4 end
+    if name == "ansimagenta" is return 5 end
+    if name == "ansicyan" is return 6 end
+    if name == "ansigray" || name == "ansiwhite" is return 7 end
+    if name == "ansibrightblack" || name == "ansidarkgray" is return 8 end
+    if name == "ansibrightred" is return 9 end
+    if name == "ansibrightgreen" is return 10 end
+    if name == "ansibrightyellow" is return 11 end
+    if name == "ansibrightblue" is return 12 end
+    if name == "ansibrightmagenta" is return 13 end
+    if name == "ansibrightcyan" is return 14 end
+    if name == "ansibrightwhite" is return 15 end
+    return -1
+end
+
+fn named_hex(name: string) -> string is
+    if name == "black" is return "#000000" end
+    if name == "red" is return "#ff0000" end
+    if name == "green" is return "#008000" end
+    if name == "yellow" is return "#ffff00" end
+    if name == "blue" is return "#0000ff" end
+    if name == "magenta" is return "#ff00ff" end
+    if name == "cyan" is return "#00ffff" end
+    if name == "white" is return "#ffffff" end
+    if name == "gray" || name == "grey" is return "#808080" end
+    if name == "orange" is return "#ffa500" end
+    if name == "pink" is return "#ffc0cb" end
+    if name == "purple" is return "#800080" end
+    if name == "brown" is return "#a52a2a" end
+    return ""
+end
+
+fn is_color_token(t: string) -> bool is
+    if string_starts_with(t, "#") is return true end
+    if string_starts_with(t, "ansi") is return true end
+    return named_hex(t) != ""
+end
+
+;; fragment SGR dla koloru; pusty gdy brak
+fn color_code(x0: string, is_bg: int, depth: int) -> string is
+    let mut x: string = x0
+    if x == "" || x == "default" || x == "ansidefault" is
+        if is_bg == 1 is return "49" end
+        return "39"
+    end
+    if depth <= 1 is return "" end
+    let named: string = named_hex(x)
+    if named != "" is x = named end
+    let mut base: int = 38
+    if is_bg == 1 is base = 48 end
+    let ai: int = ansi_index(x)
+    if ai >= 0 is
+        let mut code: int = 30 + ai
+        if ai >= 8 is code = 90 + ai - 8 end
+        if is_bg == 1 is code += 10 end
+        return to_string(code)
+    end
+    if string_starts_with(x, "#") is
+        let mut h: string = string_slice(x, 1, string_len(x))
+        if string_len(h) == 3 is
+            h = string_slice(h, 0, 1) + string_slice(h, 0, 1) + string_slice(h, 1, 2) + string_slice(h, 1, 2) + string_slice(h, 2, 3) + string_slice(h, 2, 3)
+        end
+        if string_len(h) != 6 is return "" end
+        let r: int = hex2(h, 0)
+        let g: int = hex2(h, 2)
+        let b: int = hex2(h, 4)
+        if depth >= 24 is
+            return to_string(base) + ";2;" + to_string(r) + ";" + to_string(g) + ";" + to_string(b)
+        end
+        if depth >= 8 is
+            return to_string(base) + ";5;" + to_string(to256(r, g, b))
+        end
+        let n: int = nearest16(r, g, b)
+        let mut code: int = 30 + n
+        if n >= 8 is code = 90 + n - 8 end
+        if is_bg == 1 is code += 10 end
+        return to_string(code)
+    end
+    return ""
+end
+
+fn join_codes(codes: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < codes.len() is
+        if codes[i] != "" is
+            if out != "" is out = out + ";" end
+            out = out + codes[i]
+        end
+        i += 1
+    end
+    return out
+end
+
+;; spec (już rozwinięty z klas) -> "1;38;5;12" (pusty = brak stylu)
+pub fn sgr_of(flat: string, depth: int) -> string is
+    let toks: [string] = string_split(flat, " ")
+    let mut codes: [string] = []
+    let mut i: int = 0
+    while i < toks.len() is
+        let t: string = toks[i]
+        if t == "bold" is codes.push("1") end
+        if t == "dim" is codes.push("2") end
+        if t == "italic" is codes.push("3") end
+        if t == "underline" is codes.push("4") end
+        if t == "blink" is codes.push("5") end
+        if t == "reverse" is codes.push("7") end
+        if t == "hidden" is codes.push("8") end
+        if t == "strike" is codes.push("9") end
+        if t == "nobold" is codes.push("22") end
+        if t == "noitalic" is codes.push("23") end
+        if t == "nounderline" is codes.push("24") end
+        if t == "noblink" is codes.push("25") end
+        if t == "noreverse" is codes.push("27") end
+        if string_starts_with(t, "fg:") is codes.push(color_code(string_slice(t, 3, string_len(t)), 0, depth)) end
+        if string_starts_with(t, "bg:") is codes.push(color_code(string_slice(t, 3, string_len(t)), 1, depth)) end
+        if string_starts_with(t, "sgr:") is codes.push(string_slice(t, 4, string_len(t))) end
+        if is_color_token(t) is codes.push(color_code(t, 0, depth)) end
+        i += 1
+    end
+    return join_codes(codes)
+end
+
+;; pełna ścieżka: spec z klasami -> SGR
+pub fn sgr(st: Style, spec: string, depth: int) -> string is
+    return sgr_of(resolve_style(st, spec, 0), depth)
+end
+
+;; --- ANSI ----------------------------------------------------------------
+
+pub fn strip_ansi(s: string) -> string is
+    let n: int = string_len(s)
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        let b: int = utf8::bat(s, i)
+        if b == 27 && i + 1 < n && utf8::bat(s, i + 1) == 91 is
+            let mut j: int = i + 2
+            while j < n && !utf8::in_rng(utf8::bat(s, j), 64, 126) is
+                j += 1
+            end
+            i = j + 1
+        else is
+            let e: int = utf8::next(s, i)
+            out = out + string_slice(s, i, e)
+            i = e
+        end
+    end
+    return out
+end
+
+;; tekst z sekwencjami SGR -> fragmenty ze stylem "sgr:<kody>"
+pub fn ansi(s: string) -> [Fragment] is
+    let n: int = string_len(s)
+    let mut out: [Fragment] = []
+    let mut cur: string = ""
+    let mut codes: string = ""
+    let mut i: int = 0
+    while i < n is
+        let b: int = utf8::bat(s, i)
+        if b == 27 && i + 1 < n && utf8::bat(s, i + 1) == 91 is
+            let mut j: int = i + 2
+            while j < n && !utf8::in_rng(utf8::bat(s, j), 64, 126) is
+                j += 1
+            end
+            if cur != "" is
+                if codes == "" is out.push(frag("", cur)) else is out.push(frag("sgr:" + codes, cur)) end
+                cur = ""
+            end
+            if j < n && utf8::bat(s, j) == 109 is
+                let p: string = string_slice(s, i + 2, j)
+                if p == "" || p == "0" is
+                    codes = ""
+                else is
+                    if codes == "" is codes = p else is codes = codes + ";" + p end
+                end
+            end
+            i = j + 1
+        else is
+            let e: int = utf8::next(s, i)
+            cur = cur + string_slice(s, i, e)
+            i = e
+        end
+    end
+    if cur != "" is
+        if codes == "" is out.push(frag("", cur)) else is out.push(frag("sgr:" + codes, cur)) end
+    end
+    return out
+end
+
+;; --- HTML ----------------------------------------------------------------
+
+pub fn html_escape(s: string) -> string is
+    let a: string = string_replace(s, "&", "&amp;")
+    let b: string = string_replace(a, "<", "&lt;")
+    return string_replace(b, ">", "&gt;")
+end
+
+fn unescape(s: string) -> string is
+    let a: string = string_replace(s, "&lt;", "<")
+    let b: string = string_replace(a, "&gt;", ">")
+    let c: string = string_replace(b, "&quot;", "\"")
+    return string_replace(c, "&amp;", "&")
+end
+
+;; wartość atrybutu name='..' / name=".." z treści znacznika
+fn attr_value(tag: string, name: string) -> string is
+    let idx: int = string_find(tag, name + "=")
+    if idx < 0 is return "" end
+    let start: int = idx + string_len(name) + 1
+    let q: string = string_slice(tag, start, start + 1)
+    if q != "'" && q != "\"" is return "" end
+    let rest: string = string_slice(tag, start + 1, string_len(tag))
+    let e: int = string_find(rest, q)
+    if e < 0 is return "" end
+    return string_slice(rest, 0, e)
+end
+
+fn tag_style(tag0: string) -> string is
+    let tag: string = string_trim(tag0)
+    let parts: [string] = string_split(tag, " ")
+    let name: string = string_to_lower(parts[0])
+    if name == "b" || name == "bold" is return "bold" end
+    if name == "i" || name == "italic" is return "italic" end
+    if name == "u" || name == "underline" is return "underline" end
+    if name == "s" || name == "strike" is return "strike" end
+    if name == "dim" || name == "reverse" || name == "blink" || name == "hidden" is return name end
+    if string_starts_with(name, "ansi") is return "fg:" + name end
+    if name == "style" is
+        let mut spec: string = ""
+        let fg: string = attr_value(tag, "fg")
+        let fg2: string = attr_value(tag, "color")
+        let bg: string = attr_value(tag, "bg")
+        let cls: string = attr_value(tag, "class")
+        if fg != "" is spec = spec + " fg:" + fg end
+        if fg2 != "" is spec = spec + " fg:" + fg2 end
+        if bg != "" is spec = spec + " bg:" + bg end
+        if cls != "" is spec = spec + " class:" + cls end
+        if attr_value(tag, "bold") == "true" is spec = spec + " bold" end
+        if attr_value(tag, "italic") == "true" is spec = spec + " italic" end
+        if attr_value(tag, "underline") == "true" is spec = spec + " underline" end
+        if attr_value(tag, "reverse") == "true" is spec = spec + " reverse" end
+        return string_trim(spec)
+    end
+    return "class:" + name
+end
+
+fn join_stack(st: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < st.len() is
+        if st[i] != "" is
+            if out != "" is out = out + " " end
+            out = out + st[i]
+        end
+        i += 1
+    end
+    return out
+end
+
+;; <b>, <i>, <u>, <ansired>, <style fg='#ff0000' bg='black'>, <klasa> -> fragmenty
+pub fn html(src: string) -> [Fragment] is
+    let n: int = string_len(src)
+    let mut out: [Fragment] = []
+    let mut stack: [string] = []
+    let mut cur: string = ""
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_slice(src, i, i + 1)
+        if c == "<" is
+            let rest: string = string_slice(src, i, n)
+            let e: int = string_find(rest, ">")
+            if e < 0 is
+                cur = cur + c
+                i += 1
+            else is
+                if cur != "" is
+                    out.push(frag(join_stack(stack), unescape(cur)))
+                    cur = ""
+                end
+                let inner: string = string_slice(rest, 1, e)
+                if string_starts_with(inner, "/") is
+                    let mut ns: [string] = []
+                    let mut k: int = 0
+                    while k < stack.len() - 1 is
+                        ns.push(stack[k])
+                        k += 1
+                    end
+                    stack = ns
+                else is
+                    stack.push(tag_style(inner))
+                end
+                i += e + 1
+            end
+        else is
+            let e2: int = utf8::next(src, i)
+            cur = cur + string_slice(src, i, e2)
+            i = e2
+        end
+    end
+    if cur != "" is out.push(frag(join_stack(stack), unescape(cur))) end
+    return out
+end
+
+pub fn plain(frags: [Fragment]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < frags.len() is
+        out = out + frags[i].text
+        i += 1
+    end
+    return out
+end
