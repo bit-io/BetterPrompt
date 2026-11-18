@@ -1,0 +1,31 @@
+use "bit -> BetterPrompt"
+
+fn no_spaces(text: string) -> string is
+    if string_contains(text, " ") is return "Login nie może zawierać spacji" end
+    return ""
+end
+
+fn main() is
+    let s1: betterprompt::PromptSession = betterprompt::new_session()
+    betterprompt::set_message_html(s1, "<b>Login:</b> ")
+    s1.validator = betterprompt::validator_custom(no_spaces)
+    let login: string = betterprompt::prompt(s1)
+
+    let s2: betterprompt::PromptSession = betterprompt::new_session()
+    betterprompt::set_message_html(s2, "<b>Wiek:</b> ")
+    s2.validator = betterprompt::validator_integer("Podaj liczbę całkowitą")
+    s2.default_text = "18"
+    let age: string = betterprompt::prompt(s2)
+
+    let lang: int = betterprompt::choice("Ulubiony język?", ["H#", "Rust", "Python", "Inny"], 0)
+    println("Login=" + login + " wiek=" + age + " język#=" + to_string(lang))
+
+    let pb: betterprompt::ProgressBar = betterprompt::progress_new("Zapisywanie", 20)
+    let mut i: int = 0
+    while i < 20 is
+        betterprompt::progress_advance(pb, 1)
+        sleep_ms(40)
+        i += 1
+    end
+    betterprompt::progress_finish(pb)
+end
