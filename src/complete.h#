@@ -1,0 +1,320 @@
+use "std -> fs" from "fs"
+use "std -> env" from "env"
+mod utf8
+
+pub struct Completion is
+    pub text: string
+    pub start: int
+    pub display: string
+    pub meta: string
+end
+
+pub struct Completer is
+    pub kind: string
+    pub words: [string]
+    pub metas: [string]
+    pub ignore_case: int
+    pub match_middle: int
+    pub sentence: int
+    pub only_dirs: int
+    pub custom: fn(string) -> [string]
+end
+
+fn nop_custom(s: string) -> [string] is
+    return []
+end
+
+fn base(kind: string) -> Completer is
+    return Completer { kind: kind, words: [], metas: [], ignore_case: 1, match_middle: 0, sentence: 0, only_dirs: 0, custom: nop_custom }
+end
+
+;; WordCompleter: words (+ opcjonalne opisy metas równoległe do words)
+pub fn words_completer(words: [string]) -> Completer is
+    let c: Completer = base("words")
+    c.words = words
+    return c
+end
+
+pub fn words_completer_meta(words: [string], metas: [string]) -> Completer is
+    let c: Completer = base("words")
+    c.words = words
+    c.metas = metas
+    return c
+end
+
+pub fn path_completer() -> Completer is
+    return base("path")
+end
+
+pub fn fuzzy_completer(words: [string]) -> Completer is
+    let c: Completer = base("fuzzy")
+    c.words = words
+    return c
+end
+
+;; NestedCompleter: frazy jak "show ip route", "show version", "exit"
+pub fn nested_completer(phrases: [string]) -> Completer is
+    let c: Completer = base("nested")
+    c.words = phrases
+    return c
+end
+
+;; własna funkcja: dostaje tekst przed kursorem, zwraca kandydatów na ostatnie słowo
+pub fn custom_completer(f: fn(string) -> [string]) -> Completer is
+    let c: Completer = base("custom")
+    c.custom = f
+    return c
+end
+
+;; ostatnie słowo (od ostatniej spacji/taba/nowej linii) przed kursorem
+pub fn word_before(text: string) -> string is
+    let mut p: int = string_len(text)
+    while p > 0 && !is_ws(utf8::bat(text, p - 1)) is
+        p -= 1
+    end
+    return string_slice(text, p, string_len(text))
+end
+
+fn is_ws(b: int) -> bool is
+    return b == 32 || b == 9 || b == 10
+end
+
+fn lc(s: string, ic: int) -> string is
+    if ic == 1 is return string_lower(s) end
+    return s
+end
+
+fn mk(text: string, word: string, meta: string) -> Completion is
+    return Completion { text: text, start: 0 - string_len(word), display: text, meta: meta }
+end
+
+fn meta_at(c: Completer, i: int) -> string is
+    if i < c.metas.len() is return c.metas[i] end
+    return ""
+end
+
+fn words_complete(c: Completer, text: string) -> [Completion] is
+    let mut word: string = word_before(text)
+    if c.sentence == 1 is word = text end
+    let w: string = lc(word, c.ignore_case)
+    let mut out: [Completion] = []
+    let mut i: int = 0
+    while i < c.words.len() is
+        let cand: string = c.words[i]
+        let lcand: string = lc(cand, c.ignore_case)
+        let mut ok: bool = false
+        if c.match_middle == 1 is ok = string_contains(lcand, w) else is ok = string_starts_with(lcand, w) end
+        if ok is out.push(mk(cand, word, meta_at(c, i))) end
+        i += 1
+    end
+    return out
+end
+
+;; podciąg (nie ciągły) — zwraca wynik >= 0 lub -1; mniejszy = lepszy
+fn fuzzy_score(q: string, cand: string) -> int is
+    let lq: string = string_lower(q)
+    let lcand: string = string_lower(cand)
+    let nq: int = string_len(lq)
+    let nc: int = string_len(lcand)
+    let mut qi: int = 0
+    let mut ci: int = 0
+    let mut first: int = -1
+    let mut last: int = 0
+    while ci < nc && qi < nq is
+        if string_slice(lq, qi, qi + 1) == string_slice(lcand, ci, ci + 1) is
+            if first < 0 is first = ci end
+            last = ci
+            qi += 1
+        end
+        ci += 1
+    end
+    if qi < nq is return -1 end
+    if nq == 0 is return 0 end
+    return (last - first) * 4 + first
+end
+
+fn fuzzy_complete(c: Completer, text: string) -> [Completion] is
+    let word: string = word_before(text)
+    let mut scores: [int] = []
+    let mut idxs: [int] = []
+    let mut i: int = 0
+    while i < c.words.len() is
+        let sc: int = fuzzy_score(word, c.words[i])
+        if sc >= 0 is
+            scores.push(sc)
+            idxs.push(i)
+        end
+        i += 1
+    end
+    ;; sortowanie przez wstawianie (stabilne)
+    let mut a: int = 1
+    while a < scores.len() is
+        let ks: int = scores[a]
+        let ki: int = idxs[a]
+        let mut b: int = a - 1
+        while b >= 0 && scores[b] > ks is
+            scores[b + 1] = scores[b]
+            idxs[b + 1] = idxs[b]
+            b -= 1
+        end
+        scores[b + 1] = ks
+        idxs[b + 1] = ki
+        a += 1
+    end
+    let mut out: [Completion] = []
+    let mut k: int = 0
+    while k < idxs.len() is
+        out.push(mk(c.words[idxs[k]], word, meta_at(c, idxs[k])))
+        k += 1
+    end
+    return out
+end
+
+fn nested_complete(c: Completer, text: string) -> [Completion] is
+    let trailing: bool = text != "" && is_ws(utf8::bat(text, string_len(text) - 1))
+    let raw: [string] = string_split(string_trim(text), " ")
+    let mut toks: [string] = []
+    let mut i: int = 0
+    while i < raw.len() is
+        if raw[i] != "" is toks.push(raw[i]) end
+        i += 1
+    end
+    let mut partial: string = ""
+    let mut k: int = toks.len()
+    if !trailing && toks.len() > 0 is
+        partial = toks[toks.len() - 1]
+        k = toks.len() - 1
+    end
+    let mut out: [Completion] = []
+    let mut seen: [string] = []
+    let mut p: int = 0
+    while p < c.words.len() is
+        let ph: [string] = string_split(c.words[p], " ")
+        if ph.len() > k is
+            let mut match_prefix: bool = true
+            let mut j: int = 0
+            while j < k is
+                if ph[j] != toks[j] is match_prefix = false end
+                j += 1
+            end
+            if match_prefix && string_starts_with(string_lower(ph[k]), string_lower(partial)) is
+                let cand: string = ph[k]
+                if !iter_has(seen, cand) is
+                    seen.push(cand)
+                    out.push(mk(cand, partial, meta_at(c, p)))
+                end
+            end
+        end
+        p += 1
+    end
+    return out
+end
+
+fn iter_has(a: [string], s: string) -> bool is
+    let mut i: int = 0
+    while i < a.len() is
+        if a[i] == s is return true end
+        i += 1
+    end
+    return false
+end
+
+fn path_complete(c: Completer, text: string) -> [Completion] is
+    let word: string = word_before(text)
+    let slash: int = string_rfind(word, "/")
+    let mut dirpart: string = ""
+    let mut prefix: string = string_slice(word, 0, string_len(word))
+    if slash >= 0 is
+        dirpart = string_slice(word, 0, slash + 1)
+        prefix = string_slice(word, slash + 1, string_len(word))
+    end
+    let mut dir: string = string_slice(dirpart, 0, string_len(dirpart))
+    if dir == "" is dir = "." end
+    if string_starts_with(dir, "~") is dir = env::home() + string_slice(dir, 1, string_len(dir)) end
+    let mut out: [Completion] = []
+    if !is_dir(dir) is return out end
+    let names: [string] = sort_names(fs::list_dir(dir))
+    let mut i: int = 0
+    while i < names.len() is
+        let nm: string = names[i]
+        let hidden: bool = string_starts_with(nm, ".")
+        if string_starts_with(nm, prefix) && (!hidden || string_starts_with(prefix, ".")) is
+            let full: string = path_join2(dir, nm)
+            let d: bool = is_dir(full)
+            if d || c.only_dirs == 0 is
+                let mut t: string = string_slice(nm, 0, string_len(nm))
+                if d is t = nm + "/" end
+                out.push(Completion { text: t, start: 0 - string_len(prefix), display: t, meta: "" })
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+fn sort_names(a: [string]) -> [string] is
+    let mut r: [string] = []
+    let mut i: int = 0
+    while i < a.len() is
+        r.push(a[i])
+        i += 1
+    end
+    let mut x: int = 1
+    while x < r.len() is
+        let k: string = r[x]
+        let mut y: int = x - 1
+        while y >= 0 && r[y] > k is
+            r[y + 1] = r[y]
+            y -= 1
+        end
+        r[y + 1] = k
+        x += 1
+    end
+    return r
+end
+
+fn path_join2(a: string, b: string) -> string is
+    if string_ends_with(a, "/") is return a + b end
+    return a + "/" + b
+end
+
+;; kandydaci dla tekstu przed kursorem
+pub fn get_completions(c: Completer, text: string) -> [Completion] is
+    if c.kind == "words" is return words_complete(c, text) end
+    if c.kind == "fuzzy" is return fuzzy_complete(c, text) end
+    if c.kind == "nested" is return nested_complete(c, text) end
+    if c.kind == "path" is return path_complete(c, text) end
+    if c.kind == "custom" is
+        let word: string = word_before(text)
+        let cands: [string] = c.custom(text)
+        let mut out: [Completion] = []
+        let mut i: int = 0
+        while i < cands.len() is
+            out.push(mk(cands[i], word, ""))
+            i += 1
+        end
+        return out
+    end
+    return []
+end
+
+;; wspólny prefiks tekstów uzupełnień (na granicy znaku)
+pub fn common_prefix(comps: [Completion]) -> string is
+    if comps.len() == 0 is return "" end
+    let first: string = comps[0].text
+    let mut n: int = string_len(first)
+    let mut i: int = 1
+    while i < comps.len() is
+        let t: string = comps[i].text
+        let mut k: int = 0
+        while k < n && k < string_len(t) && string_slice(first, k, k + 1) == string_slice(t, k, k + 1) is
+            k += 1
+        end
+        n = k
+        i += 1
+    end
+    while n > 0 && n < string_len(first) && utf8::is_cont(utf8::bat(first, n)) is
+        n -= 1
+    end
+    return string_slice(first, 0, n)
+end
