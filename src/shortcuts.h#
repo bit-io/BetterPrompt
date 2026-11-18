@@ -1,0 +1,179 @@
+mod utf8
+mod term
+mod style
+mod render
+
+fn st_depth() -> int is
+    return style::color_depth()
+end
+
+;; drukuje fragmenty z kolorami (jak print_formatted_text); end = tekst końcowy (zwykle "\n")
+pub fn print_fragments(frags: [style::Fragment], st: style::Style, tail: string) is
+    let depth: int = st_depth()
+    let mut o: string = ""
+    let mut i: int = 0
+    while i < frags.len() is
+        let code: string = style::sgr(st, frags[i].style, depth)
+        if code != "" is
+            o = o + "\x1b[" + code + "m" + frags[i].text + "\x1b[0m"
+        else is
+            o = o + frags[i].text
+        end
+        i += 1
+    end
+    term::out(o + tail)
+end
+
+;; print_formatted_text(HTML("<b>x</b>"))
+pub fn print_html(markup: string) is
+    print_fragments(style::html(markup), style::default_style(), "\n")
+end
+
+pub fn print_html_style(markup: string, st: style::Style) is
+    print_fragments(style::html(markup), st, "\n")
+end
+
+pub fn print_ansi(text: string) is
+    let fr: [style::Fragment] = style::ansi(text)
+    let mut o: string = ""
+    let mut i: int = 0
+    while i < fr.len() is
+        if string_starts_with(fr[i].style, "sgr:") is
+            o = o + "\x1b[" + string_slice(fr[i].style, 4, string_len(fr[i].style)) + "m" + fr[i].text + "\x1b[0m"
+        else is
+            o = o + fr[i].text
+        end
+        i += 1
+    end
+    term::out(o + "\n")
+end
+
+pub fn clear_screen() is
+    term::out("\x1b[2J\x1b[H")
+end
+
+pub fn set_title(title: string) is
+    term::out("\x1b]2;" + title + "\x07")
+end
+
+pub fn clear_title() is
+    term::out("\x1b]2;\x07")
+end
+
+fn wait_key(t: term::Term) -> string is
+    let mut k: string = ""
+    while k == "" is
+        k = term::read_key(t)
+    end
+    return k
+end
+
+;; confirm: y/n. default: 1 = Tak (Enter), 0 = Nie (Enter), -1 = trzeba odpowiedzieć y/n
+pub fn confirm(message: string, default: int) -> bool is
+    let t: term::Term = term::new_term()
+    let mut suffix: string = " (y/n) "
+    if default == 1 is suffix = " (Y/n) " end
+    if default == 0 is suffix = " (y/N) " end
+    if t.tty_in == 0 is
+        term::out(message + suffix)
+        let ln: string = string_lower(string_trim(term::read_plain_line(t)))
+        if ln == "y" || ln == "yes" is return true end
+        if ln == "" && default == 1 is return true end
+        return false
+    end
+    term::enter_raw(t)
+    term::out(message + suffix)
+    let mut result: int = -2
+    while result == -2 is
+        let k: string = wait_key(t)
+        if k == "y" || k == "Y" is result = 1 end
+        if k == "n" || k == "N" is result = 0 end
+        if k == "c-c" || k == "c-d" || k == "escape" is result = 0 end
+        if k == "enter" && default >= 0 is result = default end
+    end
+    if result == 1 is term::out("y\r\n") else is term::out("n\r\n") end
+    term::leave_raw(t)
+    return result == 1
+end
+
+fn choice_lines(message: string, options: [string], idx: int, st: style::Style, depth: int) -> [string] is
+    let mut lines: [string] = [message]
+    let sel: string = style::sgr(st, "class:choice.selected", depth)
+    let mut i: int = 0
+    while i < options.len() is
+        let label: string = to_string(i + 1) + ". " + options[i]
+        if i == idx is
+            if sel != "" is
+                lines.push("\x1b[" + sel + "m> " + label + "\x1b[0m")
+            else is
+                lines.push("> " + label)
+            end
+        else is
+            lines.push("  " + label)
+        end
+        i += 1
+    end
+    return lines
+end
+
+;; choice: lista opcji (strzałki / j k / cyfry 1-9 / Enter). Zwraca indeks lub -1 (Esc / Ctrl-C).
+pub fn choice(message: string, options: [string], default_idx: int) -> int is
+    let t: term::Term = term::new_term()
+    let n: int = options.len()
+    if n == 0 is return -1 end
+    let mut idx: int = default_idx
+    if idx < 0 || idx >= n is idx = 0 end
+    if t.tty_in == 0 is
+        term::out(message + "\n")
+        let mut i: int = 0
+        while i < n is
+            term::out("  " + to_string(i + 1) + ". " + options[i] + "\n")
+            i += 1
+        end
+        term::out("> ")
+        let v: int = to_int(string_trim(term::read_plain_line(t)))
+        if v >= 1 && v <= n is return v - 1 end
+        return -1
+    end
+    let st: style::Style = style::default_style()
+    let depth: int = st_depth()
+    term::enter_raw(t)
+    term::out("\x1b[?25l")
+    let mut first: int = 1
+    let mut done: int = 0
+    let mut result: int = -1
+    while done == 0 is
+        let lines: [string] = choice_lines(message, options, idx, st, depth)
+        let mut o: string = ""
+        if first == 0 is o = "\x1b[" + to_string(n) + "A" end
+        o = o + "\r\x1b[J"
+        let mut k: int = 0
+        while k < lines.len() is
+            if k > 0 is o = o + "\r\n" end
+            o = o + lines[k]
+            k += 1
+        end
+        term::out(o)
+        first = 0
+        let key: string = wait_key(t)
+        if key == "up" || key == "k" || key == "c-p" is idx = (idx + n - 1) % n end
+        if key == "down" || key == "j" || key == "c-n" || key == "tab" is idx = (idx + 1) % n end
+        if key == "enter" is
+            result = idx
+            done = 1
+        end
+        if key == "c-c" || key == "escape" || key == "c-d" is done = 1 end
+        if utf8::char_count(key) == 1 && key >= "1" && key <= "9" is
+            let d: int = to_int(key)
+            if d <= n is
+                result = d - 1
+                done = 1
+            end
+        end
+    end
+    let mut fin: string = "\x1b[" + to_string(n) + "A\r\x1b[J" + message
+    if result >= 0 is fin = fin + " " + options[result] end
+    term::out(fin + "\r\n\x1b[?25h")
+    term::leave_raw(t)
+    return result
+end
