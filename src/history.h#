@@ -1,0 +1,73 @@
+use "std -> fs" from "fs"
+use "std -> env" from "env"
+
+pub struct History is
+    pub entries: [string]
+    pub path: string
+end
+
+pub fn new_history() -> History is
+    return History { entries: [], path: "" }
+end
+
+fn expand_home(p: string) -> string is
+    if string_starts_with(p, "~/") is return env::home() + string_slice(p, 1, string_len(p)) end
+    return p
+end
+
+;; wczytuje wpisy z pliku: linie "+tekst" tworzą wpis, "# czas" / pusta linia go kończą
+pub fn history_load(h: History) is
+    if h.path == "" is return end
+    h.entries = []
+    if !file_exists(h.path) is return end
+    let lines: [string] = string_split(read_file(h.path), "\n")
+    let mut cur: [string] = []
+    let mut i: int = 0
+    while i < lines.len() is
+        let ln: string = lines[i]
+        if string_starts_with(ln, "+") is
+            cur.push(string_slice(ln, 1, string_len(ln)))
+        else is
+            if cur.len() > 0 is
+                h.entries.push(iter_join(cur, "\n"))
+                cur = []
+            end
+        end
+        i += 1
+    end
+    if cur.len() > 0 is h.entries.push(iter_join(cur, "\n")) end
+end
+
+pub fn file_history(path: string) -> History is
+    let h: History = History { entries: [], path: expand_home(path) }
+    history_load(h)
+    return h
+end
+
+fn parent_dir(p: string) -> string is
+    let i: int = string_rfind(p, "/")
+    if i <= 0 is return "" end
+    return string_slice(p, 0, i)
+end
+
+pub fn history_append(h: History, text: string) is
+    if text == "" is return end
+    h.entries.push(text)
+    if h.path == "" is return end
+    let parent: string = parent_dir(h.path)
+    if parent != "" && !file_exists(parent) is mkdir_all(parent) end
+    let lines: [string] = string_split(text, "\n")
+    let ts: int = now_unix()
+    let mut chunk: string = "\n# " + to_string(ts) + "\n"
+    let mut i: int = 0
+    while i < lines.len() is
+        chunk = chunk + "+" + lines[i] + "\n"
+        i += 1
+    end
+    append_file(h.path, chunk)
+end
+
+pub fn history_clear(h: History) is
+    h.entries = []
+    if h.path != "" && file_exists(h.path) is write_file(h.path, "") end
+end
