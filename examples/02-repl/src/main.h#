@@ -1,0 +1,58 @@
+use "bit -> BetterPrompt"
+
+fn f2(b: betterprompt::Buffer) -> int is
+    betterprompt::buffer_set_text(b, "help", 4)
+    return 1
+end
+
+fn toolbar(text: string) -> string is
+    return " <b>F2</b> = help  |  <b>Ctrl-R</b> szukaj  |  znaków: " + to_string(string_len(text)) + " "
+end
+
+fn run_command(line: string) -> int is
+    let parts: [string] = string_split(string_trim(line), " ")
+    let cmd: string = parts[0]
+    if cmd == "" is return 0 end
+    if cmd == "exit" || cmd == "quit" is return 1 end
+    if cmd == "help" is
+        betterprompt::print_html("Komendy: <b>show version</b>, <b>show ip route</b>, <b>echo TEKST</b>, <b>clear</b>, <b>exit</b>")
+    elsif cmd == "echo" is
+        println(iter_join(parts, " "))
+    elsif cmd == "clear" is
+        betterprompt::clear_screen()
+    elsif cmd == "show" && parts.len() > 1 && parts[1] == "version" is
+        println("betterprompt " + betterprompt::version())
+    elsif cmd == "show" && parts.len() > 2 && parts[1] == "ip" && parts[2] == "route" is
+        println("0.0.0.0/0 via 192.168.0.1")
+    else is
+        betterprompt::print_html("<ansired>Nieznana komenda:</ansired> " + betterprompt::html_escape(cmd))
+    end
+    return 0
+end
+
+fn main() is
+    let s: betterprompt::PromptSession = betterprompt::new_session()
+    betterprompt::set_message_html(s, "<ansigreen><b>bp</b></ansigreen><ansibrightblack>@repl</ansibrightblack> <b>❯</b> ")
+    s.history = betterprompt::file_history("~/.betterprompt_example_history")
+    betterprompt::add_completer(s, betterprompt::nested_completer(["help", "echo", "clear", "exit", "show version", "show ip route", "show ip arp"]))
+    betterprompt::add_binding(s, "f2", f2)
+    betterprompt::set_bottom_toolbar_fn(s, toolbar)
+    betterprompt::set_rprompt_html(s, "<ansibrightblack>wersja " + betterprompt::version() + "</ansibrightblack>")
+    betterprompt::set_placeholder_html(s, "wpisz komendę (help)")
+    s.lexer = betterprompt::lexer_simple(["help", "echo", "show", "exit", "clear"], "#")
+    s.auto_suggest = 1
+    s.enable_history_search = 1
+    if env_get("VI") == "1" is s.vi_mode = 1 end
+    let mut done: int = 0
+    while done == 0 is
+        let line: string = betterprompt::prompt(s)
+        if betterprompt::session_eof(s) is
+            done = 1
+        elsif betterprompt::session_interrupted(s) is
+            println("(Ctrl-C)")
+        else is
+            done = run_command(line)
+        end
+    end
+    println("Do widzenia!")
+end
