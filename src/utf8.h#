@@ -1,0 +1,180 @@
+use "std -> conv" from "conv"
+
+;; UWAGA (błąd kompilatora H# 0.9): literały całkowite >= 128 wpisane bezpośrednio w wyrażeniu
+;; z `int` są obcinane do i8. Dlatego wszystkie takie liczby są stałymi albo argumentami funkcji.
+const C128: int = 128
+const C192: int = 192
+const C224: int = 224
+const C240: int = 240
+const C256: int = 256
+
+;; lo <= v <= hi (argumenty funkcji nie są obcinane)
+pub fn in_rng(v: int, lo: int, hi: int) -> bool is
+    return v >= lo && v <= hi
+end
+
+;; wartość bajtu na pozycji i (0..255)
+pub fn bat(s: string, i: int) -> int is
+    return conv::char_to_int(string_slice(s, i, i + 1))
+end
+
+pub fn is_cont(b: int) -> bool is
+    return b >= C128 && b < C192
+end
+
+;; długość sekwencji UTF-8 po bajcie wiodącym
+pub fn clen(b0: int) -> int is
+    if b0 < C192 is return 1 end
+    if b0 < C224 is return 2 end
+    if b0 < C240 is return 3 end
+    return 4
+end
+
+;; początek następnego znaku
+pub fn next(s: string, pos: int) -> int is
+    let n: int = string_len(s)
+    if pos >= n is return n end
+    let e: int = pos + clen(bat(s, pos))
+    if e > n is return n end
+    return e
+end
+
+;; początek poprzedniego znaku
+pub fn prev(s: string, pos: int) -> int is
+    if pos <= 0 is return 0 end
+    let mut p: int = pos - 1
+    while p > 0 && is_cont(bat(s, p)) is
+        p -= 1
+    end
+    return p
+end
+
+pub fn char_at(s: string, pos: int) -> string is
+    return string_slice(s, pos, next(s, pos))
+end
+
+;; punkt kodowy znaku na pozycji pos
+pub fn cp_at(s: string, pos: int) -> int is
+    return conv::char_to_int(char_at(s, pos))
+end
+
+pub fn from_cp(cp: int) -> string is
+    return conv::int_to_char(cp)
+end
+
+;; szerokość komórek terminala dla punktu kodowego (CJK/emoji = 2, łączące = 0)
+pub fn cp_width(cp: int) -> int is
+    if cp < 32 || cp == 127 is return 2 end
+    if cp < 127 is return 1 end
+    if in_rng(cp, 768, 879) is return 0 end
+    if in_rng(cp, 8203, 8207) is return 0 end
+    if in_rng(cp, 65024, 65039) is return 0 end
+    if in_rng(cp, 4352, 4447) is return 2 end
+    if in_rng(cp, 11904, 42191) is return 2 end
+    if in_rng(cp, 44032, 55203) is return 2 end
+    if in_rng(cp, 63744, 64255) is return 2 end
+    if in_rng(cp, 65072, 65135) is return 2 end
+    if in_rng(cp, 65281, 65376) is return 2 end
+    if in_rng(cp, 65504, 65510) is return 2 end
+    if in_rng(cp, 127744, 128591) is return 2 end
+    if in_rng(cp, 129280, 129535) is return 2 end
+    if in_rng(cp, 131072, 262141) is return 2 end
+    return 1
+end
+
+;; szerokość w komórkach (bez sekwencji ANSI nie liczymy — podawaj czysty tekst)
+pub fn str_width(s: string) -> int is
+    let n: int = string_len(s)
+    let mut i: int = 0
+    let mut w: int = 0
+    while i < n is
+        let b: int = bat(s, i)
+        if b < C128 is
+            if b >= 32 && b != 127 is w += 1 else is w += 2 end
+            i += 1
+        else is
+            w += cp_width(cp_at(s, i))
+            i = next(s, i)
+        end
+    end
+    return w
+end
+
+pub fn char_count(s: string) -> int is
+    let n: int = string_len(s)
+    let mut i: int = 0
+    let mut c: int = 0
+    while i < n is
+        i = next(s, i)
+        c += 1
+    end
+    return c
+end
+
+;; bajty (0..255) -> napis UTF-8; błędne sekwencje zamieniane na '?'
+pub fn decode(bs: [int]) -> string is
+    let n: int = bs.len()
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        let b: int = bs[i]
+        if b < C128 is
+            if b > 0 is out = out + conv::int_to_char(b) end
+            i += 1
+        else is
+            let l: int = clen(b)
+            if b < C192 || i + l > n is
+                out = out + "?"
+                i += 1
+            else is
+                let mut cp: int = 0
+                if l == 2 is cp = b % 32 end
+                if l == 3 is cp = b % 16 end
+                if l == 4 is cp = b % 8 end
+                let mut k: int = 1
+                while k < l is
+                    cp = cp * 64 + bs[i + k] % 64
+                    k += 1
+                end
+                out = out + conv::int_to_char(cp)
+                i += l
+            end
+        end
+    end
+    return out
+end
+
+pub fn spaces(n: int) -> string is
+    if n <= 0 is return "" end
+    return string_repeat(" ", n)
+end
+
+;; obcina do width komórek (bez wielokropka)
+pub fn truncate(s: string, width: int) -> string is
+    let n: int = string_len(s)
+    let mut i: int = 0
+    let mut w: int = 0
+    while i < n is
+        let nx: int = next(s, i)
+        let cw: int = cp_width(cp_at(s, i))
+        if w + cw > width is return string_slice(s, 0, i) end
+        w += cw
+        i = nx
+    end
+    return s
+end
+
+;; uzupełnia spacjami do width komórek (lub obcina)
+pub fn pad(s: string, width: int) -> string is
+    let w: int = str_width(s)
+    if w >= width is return truncate(s, width) end
+    return s + spaces(width - w)
+end
+
+pub fn is_word_cp(cp: int) -> bool is
+    if cp >= 48 && cp <= 57 is return true end
+    if cp >= 65 && cp <= 90 is return true end
+    if cp >= 97 && cp <= 122 is return true end
+    if cp == 95 || cp >= C128 is return true end
+    return false
+end
