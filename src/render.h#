@@ -1,0 +1,74 @@
+mod utf8
+
+pub struct Canvas is
+    pub width: int
+    pub rows: [string]
+    pub widths: [int]
+    pub cur: string
+    pub col: int
+    pub last: string
+    pub crow: int
+    pub ccol: int
+    pub marked: int
+end
+
+pub fn cv_new(width: int) -> Canvas is
+    return Canvas { width: width, rows: [], widths: [], cur: "", col: 0, last: "", crow: 0, ccol: 0, marked: 0 }
+end
+
+fn cv_style(cv: Canvas, sgr: string) is
+    if sgr == cv.last is return end
+    if cv.last != "" is cv.cur = cv.cur + "\x1b[0m" end
+    if sgr != "" is cv.cur = cv.cur + "\x1b[" + sgr + "m" end
+    cv.last = sgr
+end
+
+pub fn cv_endrow(cv: Canvas) is
+    if cv.last != "" is cv.cur = cv.cur + "\x1b[0m" end
+    cv.last = ""
+    cv.rows.push(cv.cur)
+    cv.widths.push(cv.col)
+    cv.cur = ""
+    cv.col = 0
+end
+
+;; jeden znak o szerokości w komórek
+pub fn cv_put(cv: Canvas, ch: string, w: int, sgr: string) is
+    if w > 0 && cv.col + w > cv.width is cv_endrow(cv) end
+    cv_style(cv, sgr)
+    cv.cur = cv.cur + ch
+    cv.col += w
+end
+
+;; wstawia napis (znak po znaku; "\n" = nowy wiersz; znaki sterujące jako ^X)
+pub fn cv_text(cv: Canvas, s: string, sgr: string) is
+    let n: int = string_len(s)
+    let mut i: int = 0
+    while i < n is
+        let e: int = utf8::next(s, i)
+        let ch: string = string_slice(s, i, e)
+        let cp: int = utf8::cp_at(s, i)
+        if cp == 10 is
+            cv_endrow(cv)
+        elsif cp < 32 is
+            cv_put(cv, "^", 1, sgr)
+            cv_put(cv, utf8::from_cp(cp + 64), 1, sgr)
+        else is
+            cv_put(cv, ch, utf8::cp_width(cp), sgr)
+        end
+        i = e
+    end
+end
+
+;; zapamiętuje pozycję kursora (przed następnym znakiem)
+pub fn cv_mark(cv: Canvas) is
+    if cv.marked == 1 is return end
+    if cv.col >= cv.width is cv_endrow(cv) end
+    cv.crow = cv.rows.len()
+    cv.ccol = cv.col
+    cv.marked = 1
+end
+
+pub fn cv_finish(cv: Canvas) is
+    cv_endrow(cv)
+end
