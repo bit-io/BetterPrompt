@@ -1,0 +1,290 @@
+use "std -> io" from "io"
+mod utf8
+
+const C128: int = 128
+const C256: int = 256
+
+extern static [c] is
+    fn read(fd: int, buf: any, n: int) -> int
+    fn isatty(fd: int) -> int
+    fn ioctl(fd: int, req: int, buf: any) -> int
+    fn system(cmd: string) -> int
+end
+
+pub struct Term is
+    pub tty_in: int
+    pub tty_out: int
+    pub saved: string
+    pub raw: int
+    pub rows: int
+    pub cols: int
+    pub paste: string
+    pub eof: int
+end
+
+pub fn new_term() -> Term is
+    return Term { tty_in: isatty(0), tty_out: isatty(1), saved: "", raw: 0, rows: 24, cols: 80, paste: "", eof: 0 }
+end
+
+;; zapis na stdout z natychmiastowym flush
+pub fn out(s: string) is
+    print(s)
+    io::flush()
+end
+
+;; uruchamia polecenie z pełnym dostępem do terminala (np. $EDITOR)
+pub fn run_interactive(cmd: string) -> int is
+    return system(cmd)
+end
+
+pub fn refresh_size(t: Term) is
+    let mut r: int = 24
+    let mut c: int = 80
+    let env_c: string = env_get("COLUMNS")
+    if env_c != "" is
+        let v: int = to_int(env_c)
+        if v > 0 is c = v end
+    end
+    let env_r: string = env_get("LINES")
+    if env_r != "" is
+        let v2: int = to_int(env_r)
+        if v2 > 0 is r = v2 end
+    end
+    if t.tty_out == 1 || t.tty_in == 1 is
+        unsafe is
+            let buf = arc_alloc(16)
+            let mut fd: int = 1
+            if t.tty_out == 0 is fd = 0 end
+            let rc: int = ioctl(fd, 21523, buf)
+            if rc == 0 is
+                let rr: int = ptr_read_i16(buf, 0)
+                let cc: int = ptr_read_i16(buf, 2)
+                if rr > 0 && cc > 0 is
+                    r = rr
+                    c = cc
+                end
+            end
+            arc_release(buf)
+        end
+    end
+    t.rows = r
+    t.cols = c
+end
+
+;; tryb surowy: bez echa, bez ISIG; read() wraca po 100 ms (VMIN=0, VTIME=1)
+pub fn enter_raw(t: Term) is
+    if t.tty_in == 0 || t.raw == 1 is return end
+    t.saved = string_trim(shell("stty -g"))
+    shell("stty raw -echo min 0 time 1")
+    t.raw = 1
+end
+
+pub fn leave_raw(t: Term) is
+    if t.raw == 0 is return end
+    if t.saved != "" is
+        shell("stty " + t.saved)
+    else is
+        shell("stty sane")
+    end
+    t.raw = 0
+end
+
+;; jeden bajt 0..255; -1 = timeout/EOF
+pub fn read_byte() -> int is
+    let mut r: int = -1
+    unsafe is
+        let buf = arc_alloc(8)
+        let n: int = read(0, buf, 1)
+        if n == 1 is
+            r = ptr_read_i8(buf, 0)
+            if r < 0 is r = r + C256 end
+        end
+        arc_release(buf)
+    end
+    return r
+end
+
+;; blokujący odczyt bajtu (dla trybu nie-tty): -1 tylko przy EOF
+pub fn read_byte_blocking() -> int is
+    return read_byte()
+end
+
+;; linia ze stdin bez przechowywania w stdio (tryb potokowy). eof=1 gdy nic nie wczytano.
+pub fn read_plain_line(t: Term) -> string is
+    t.eof = 0
+    let mut bs: [int] = []
+    let mut got: int = 0
+    let mut done: int = 0
+    while done == 0 is
+        let b: int = read_byte()
+        if b < 0 is
+            done = 1
+        else is
+            got = 1
+            if b == 10 is
+                done = 1
+            else is
+                if b != 13 is bs.push(b) end
+            end
+        end
+    end
+    if got == 0 is
+        t.eof = 1
+        return ""
+    end
+    return utf8::decode(bs)
+end
+
+fn name_ctrl(b: int) -> string is
+    if b == 0 is return "c-@" end
+    if b == 9 is return "tab" end
+    if b == 13 is return "enter" end
+    if b == 10 is return "c-j" end
+    if b == 27 is return "escape" end
+    if b >= 1 && b <= 26 is return "c-" + utf8::from_cp(b + 96) end
+    if b == 28 is return "c-\\" end
+    if b == 29 is return "c-]" end
+    if b == 30 is return "c-^" end
+    return "c-_"
+end
+
+;; kod modyfikatora xterm (2=shift 3=alt 5=ctrl 6=ctrl+shift 7=ctrl+alt) -> prefiks
+fn mod_prefix(m: string) -> string is
+    if m == "2" is return "s-" end
+    if m == "3" is return "m-" end
+    if m == "4" is return "m-s-" end
+    if m == "5" is return "c-" end
+    if m == "6" is return "c-s-" end
+    if m == "7" is return "c-m-" end
+    return ""
+end
+
+fn tilde_key(n: string) -> string is
+    if n == "1" || n == "7" is return "home" end
+    if n == "4" || n == "8" is return "end" end
+    if n == "2" is return "insert" end
+    if n == "3" is return "delete" end
+    if n == "5" is return "pageup" end
+    if n == "6" is return "pagedown" end
+    if n == "11" is return "f1" end
+    if n == "12" is return "f2" end
+    if n == "13" is return "f3" end
+    if n == "14" is return "f4" end
+    if n == "15" is return "f5" end
+    if n == "17" is return "f6" end
+    if n == "18" is return "f7" end
+    if n == "19" is return "f8" end
+    if n == "20" is return "f9" end
+    if n == "21" is return "f10" end
+    if n == "23" is return "f11" end
+    if n == "24" is return "f12" end
+    return "unknown"
+end
+
+fn final_key(f: int) -> string is
+    if f == 65 is return "up" end
+    if f == 66 is return "down" end
+    if f == 67 is return "right" end
+    if f == 68 is return "left" end
+    if f == 72 is return "home" end
+    if f == 70 is return "end" end
+    if f == 80 is return "f1" end
+    if f == 81 is return "f2" end
+    if f == 82 is return "f3" end
+    if f == 83 is return "f4" end
+    return "unknown"
+end
+
+;; wklejony tekst między ESC[200~ a ESC[201~
+fn read_paste(t: Term) is
+    let mut bs: [int] = []
+    let mut done: int = 0
+    let mut idle: int = 0
+    while done == 0 is
+        let b: int = read_byte()
+        if b < 0 is
+            idle += 1
+            if idle > 20 is done = 1 end
+        else is
+            idle = 0
+            bs.push(b)
+            let n: int = bs.len()
+            if n >= 6 && bs[n - 6] == 27 && bs[n - 5] == 91 && bs[n - 4] == 50 && bs[n - 3] == 48 && bs[n - 2] == 49 && bs[n - 1] == 126 is
+                done = 1
+                let mut k: int = 0
+                let mut keep: [int] = []
+                while k < n - 6 is
+                    keep.push(bs[k])
+                    k += 1
+                end
+                bs = keep
+            end
+        end
+    end
+    t.paste = utf8::decode(bs)
+end
+
+fn read_csi(t: Term) -> string is
+    let mut params: string = ""
+    let mut fin: int = -1
+    let mut guard: int = 0
+    while fin < 0 && guard < 32 is
+        guard += 1
+        let b: int = read_byte()
+        if b < 0 is return "escape" end
+        if b >= 64 && b <= 126 is
+            fin = b
+        else is
+            params = params + utf8::from_cp(b)
+        end
+    end
+    let parts: [string] = string_split(params, ";")
+    let mut first: string = ""
+    let mut second: string = ""
+    if parts.len() > 0 is first = parts[0] end
+    if parts.len() > 1 is second = parts[1] end
+    if fin == 126 is
+        if first == "200" is
+            read_paste(t)
+            return "paste"
+        end
+        return mod_prefix(second) + tilde_key(first)
+    end
+    if fin == 90 is return "s-tab" end
+    return mod_prefix(second) + final_key(fin)
+end
+
+;; zwraca nazwę klawisza lub "" przy timeoucie (brak wejścia); "eof" przy końcu wejścia
+pub fn read_key(t: Term) -> string is
+    let b: int = read_byte()
+    if b < 0 is return "" end
+    if b == 27 is
+        let b2: int = read_byte()
+        if b2 < 0 is return "escape" end
+        if b2 == 91 is return read_csi(t) end
+        if b2 == 79 is
+            let b3: int = read_byte()
+            if b3 < 0 is return "m-O" end
+            return final_key(b3)
+        end
+        if b2 == 27 is return "escape" end
+        if b2 == 13 is return "m-enter" end
+        if b2 == 127 is return "m-backspace" end
+        if b2 < 32 is return "m-" + name_ctrl(b2) end
+        if b2 < C128 is return "m-" + utf8::from_cp(b2) end
+        return "escape"
+    end
+    if b == 127 is return "backspace" end
+    if b < 32 is return name_ctrl(b) end
+    if b < C128 is return utf8::from_cp(b) end
+    ;; wieloznakowy UTF-8
+    let l: int = utf8::clen(b)
+    let mut bs: [int] = [b]
+    let mut k: int = 1
+    while k < l is
+        let nb: int = read_byte()
+        if nb >= 0 is bs.push(nb) end
+        k += 1
+    end
+    return utf8::decode(bs)
+end
