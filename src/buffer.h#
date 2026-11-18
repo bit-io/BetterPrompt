@@ -1,0 +1,419 @@
+mod utf8
+
+pub struct Buffer is
+    pub text: string
+    pub pos: int
+    pub undo_t: [string]
+    pub undo_p: [int]
+    pub redo_t: [string]
+    pub redo_p: [int]
+    pub ring: [string]
+    pub prev_op: string
+    pub last_op: string
+    pub yank_start: int
+    pub yank_len: int
+    pub yank_idx: int
+    pub want_col: int
+end
+
+pub fn new_buffer(text: string) -> Buffer is
+    return Buffer { text: text, pos: string_len(text), undo_t: [], undo_p: [], redo_t: [], redo_p: [], ring: [], prev_op: "", last_op: "", yank_start: 0, yank_len: 0, yank_idx: 0, want_col: -1 }
+end
+
+;; wołane na początku każdego klawisza: pamięta poprzednią operację (do grupowania undo / kill)
+pub fn begin_key(b: Buffer) is
+    b.prev_op = b.last_op
+    b.last_op = "other"
+end
+
+pub fn snapshot(b: Buffer) is
+    b.undo_t.push(b.text)
+    b.undo_p.push(b.pos)
+    if b.undo_t.len() > 120 is
+        let mut nt: [string] = []
+        let mut np: [int] = []
+        let mut i: int = 60
+        while i < b.undo_t.len() is
+            nt.push(b.undo_t[i])
+            np.push(b.undo_p[i])
+            i += 1
+        end
+        b.undo_t = nt
+        b.undo_p = np
+    end
+    b.redo_t = []
+    b.redo_p = []
+end
+
+pub fn undo(b: Buffer) is
+    let n: int = b.undo_t.len()
+    if n == 0 is return end
+    b.redo_t.push(b.text)
+    b.redo_p.push(b.pos)
+    b.text = b.undo_t[n - 1]
+    b.pos = b.undo_p[n - 1]
+    let mut nt: [string] = []
+    let mut np: [int] = []
+    let mut i: int = 0
+    while i < n - 1 is
+        nt.push(b.undo_t[i])
+        np.push(b.undo_p[i])
+        i += 1
+    end
+    b.undo_t = nt
+    b.undo_p = np
+end
+
+pub fn redo(b: Buffer) is
+    let n: int = b.redo_t.len()
+    if n == 0 is return end
+    b.undo_t.push(b.text)
+    b.undo_p.push(b.pos)
+    b.text = b.redo_t[n - 1]
+    b.pos = b.redo_p[n - 1]
+    let mut nt: [string] = []
+    let mut np: [int] = []
+    let mut i: int = 0
+    while i < n - 1 is
+        nt.push(b.redo_t[i])
+        np.push(b.redo_p[i])
+        i += 1
+    end
+    b.redo_t = nt
+    b.redo_p = np
+end
+
+;; ustawia cały tekst (z zapisem undo)
+pub fn set_text(b: Buffer, text: string, pos: int) is
+    snapshot(b)
+    b.text = text
+    b.pos = pos
+    b.want_col = -1
+end
+
+pub fn insert(b: Buffer, s: string) is
+    if s == "" is return end
+    if b.prev_op != "insert" is snapshot(b) end
+    b.text = string_slice(b.text, 0, b.pos) + s + string_slice(b.text, b.pos, string_len(b.text))
+    b.pos += string_len(s)
+    b.last_op = "insert"
+    b.want_col = -1
+end
+
+;; usuwa [from, to) i ustawia kursor na from
+pub fn delete_range(b: Buffer, from: int, to: int) is
+    if to <= from is return end
+    snapshot(b)
+    b.text = string_slice(b.text, 0, from) + string_slice(b.text, to, string_len(b.text))
+    b.pos = from
+    b.want_col = -1
+end
+
+;; --- linie ---------------------------------------------------------------
+
+pub fn line_start(text: string, pos: int) -> int is
+    let mut p: int = pos
+    while p > 0 && utf8::bat(text, p - 1) != 10 is
+        p -= 1
+    end
+    return p
+end
+
+pub fn line_end(text: string, pos: int) -> int is
+    let n: int = string_len(text)
+    let mut p: int = pos
+    while p < n && utf8::bat(text, p) != 10 is
+        p += 1
+    end
+    return p
+end
+
+pub fn col_of(text: string, pos: int) -> int is
+    return utf8::char_count(string_slice(text, line_start(text, pos), pos))
+end
+
+;; pozycja w linii zaczynającej się w ls: col-ty znak (przycięty do końca linii)
+fn pos_at_col(text: string, ls: int, col: int) -> int is
+    let le: int = line_end(text, ls)
+    let mut p: int = ls
+    let mut c: int = 0
+    while p < le && c < col is
+        p = utf8::next(text, p)
+        c += 1
+    end
+    return p
+end
+
+pub fn row_count(text: string) -> int is
+    let parts: [string] = string_split(text, "\n")
+    return parts.len()
+end
+
+pub fn is_first_line(b: Buffer) -> bool is
+    return line_start(b.text, b.pos) == 0
+end
+
+pub fn is_last_line(b: Buffer) -> bool is
+    return line_end(b.text, b.pos) >= string_len(b.text)
+end
+
+;; --- ruch ----------------------------------------------------------------
+
+pub fn left(b: Buffer, n: int) is
+    let mut i: int = 0
+    while i < n && b.pos > 0 is
+        b.pos = utf8::prev(b.text, b.pos)
+        i += 1
+    end
+    b.want_col = -1
+end
+
+pub fn right(b: Buffer, n: int) is
+    let mut i: int = 0
+    while i < n && b.pos < string_len(b.text) is
+        b.pos = utf8::next(b.text, b.pos)
+        i += 1
+    end
+    b.want_col = -1
+end
+
+pub fn home(b: Buffer) is
+    b.pos = line_start(b.text, b.pos)
+    b.want_col = -1
+end
+
+pub fn end_of_line(b: Buffer) is
+    b.pos = line_end(b.text, b.pos)
+    b.want_col = -1
+end
+
+pub fn text_start(b: Buffer) is
+    b.pos = 0
+    b.want_col = -1
+end
+
+pub fn text_end(b: Buffer) is
+    b.pos = string_len(b.text)
+    b.want_col = -1
+end
+
+fn is_word_at(text: string, p: int) -> bool is
+    return utf8::is_word_cp(utf8::cp_at(text, p))
+end
+
+;; początek następnego słowa (readline: forward-word kończy się na końcu słowa)
+pub fn word_end_fwd(text: string, pos: int) -> int is
+    let n: int = string_len(text)
+    let mut p: int = pos
+    while p < n && !is_word_at(text, p) is
+        p = utf8::next(text, p)
+    end
+    while p < n && is_word_at(text, p) is
+        p = utf8::next(text, p)
+    end
+    return p
+end
+
+pub fn word_start_back(text: string, pos: int) -> int is
+    let mut p: int = pos
+    while p > 0 && !is_word_at(text, utf8::prev(text, p)) is
+        p = utf8::prev(text, p)
+    end
+    while p > 0 && is_word_at(text, utf8::prev(text, p)) is
+        p = utf8::prev(text, p)
+    end
+    return p
+end
+
+;; słowo rozdzielane białymi znakami (dla c-w)
+pub fn bigword_start_back(text: string, pos: int) -> int is
+    let mut p: int = pos
+    while p > 0 && is_space_at(text, utf8::prev(text, p)) is
+        p = utf8::prev(text, p)
+    end
+    while p > 0 && !is_space_at(text, utf8::prev(text, p)) is
+        p = utf8::prev(text, p)
+    end
+    return p
+end
+
+pub fn is_space_at(text: string, p: int) -> bool is
+    let c: int = utf8::bat(text, p)
+    return c == 32 || c == 9 || c == 10
+end
+
+pub fn word_fwd(b: Buffer) is
+    b.pos = word_end_fwd(b.text, b.pos)
+    b.want_col = -1
+end
+
+pub fn word_back(b: Buffer) is
+    b.pos = word_start_back(b.text, b.pos)
+    b.want_col = -1
+end
+
+;; w górę / w dół po liniach tekstu; zwraca 1 gdy się ruszył, 0 gdy brak linii
+pub fn up(b: Buffer) -> int is
+    let ls: int = line_start(b.text, b.pos)
+    if ls == 0 is return 0 end
+    if b.want_col < 0 is b.want_col = col_of(b.text, b.pos) end
+    let pls: int = line_start(b.text, ls - 1)
+    b.pos = pos_at_col(b.text, pls, b.want_col)
+    return 1
+end
+
+pub fn down(b: Buffer) -> int is
+    let le: int = line_end(b.text, b.pos)
+    if le >= string_len(b.text) is return 0 end
+    if b.want_col < 0 is b.want_col = col_of(b.text, b.pos) end
+    b.pos = pos_at_col(b.text, le + 1, b.want_col)
+    return 1
+end
+
+;; --- kasowanie i kill ring -----------------------------------------------
+
+pub fn delete_back(b: Buffer, n: int) is
+    if b.pos == 0 is return end
+    let mut p: int = b.pos
+    let mut i: int = 0
+    while i < n && p > 0 is
+        p = utf8::prev(b.text, p)
+        i += 1
+    end
+    delete_range(b, p, b.pos)
+end
+
+pub fn delete_fwd(b: Buffer, n: int) is
+    let mut p: int = b.pos
+    let mut i: int = 0
+    while i < n && p < string_len(b.text) is
+        p = utf8::next(b.text, p)
+        i += 1
+    end
+    delete_range(b, b.pos, p)
+end
+
+pub fn kill_add(b: Buffer, s: string, forward: int) is
+    if s == "" is return end
+    let n: int = b.ring.len()
+    if b.prev_op == "kill" && n > 0 is
+        if forward == 1 is b.ring[n - 1] = b.ring[n - 1] + s else is b.ring[n - 1] = s + b.ring[n - 1] end
+    else is
+        b.ring.push(s)
+        if b.ring.len() > 60 is
+            let mut nr: [string] = []
+            let mut i: int = 1
+            while i < b.ring.len() is
+                nr.push(b.ring[i])
+                i += 1
+            end
+            b.ring = nr
+        end
+    end
+    b.last_op = "kill"
+end
+
+;; usuwa [from,to) i zapisuje w kill ringu
+pub fn kill_range(b: Buffer, from: int, to: int, forward: int) is
+    if to <= from is return end
+    let s: string = string_slice(b.text, from, to)
+    delete_range(b, from, to)
+    kill_add(b, s, forward)
+end
+
+pub fn kill_to_eol(b: Buffer) is
+    let le: int = line_end(b.text, b.pos)
+    if le == b.pos && le < string_len(b.text) is
+        kill_range(b, b.pos, le + 1, 1)
+    else is
+        kill_range(b, b.pos, le, 1)
+    end
+end
+
+pub fn kill_to_bol(b: Buffer) is
+    let ls: int = line_start(b.text, b.pos)
+    if ls == b.pos && ls > 0 is
+        kill_range(b, ls - 1, b.pos, 0)
+    else is
+        kill_range(b, ls, b.pos, 0)
+    end
+end
+
+pub fn kill_bigword_back(b: Buffer) is
+    kill_range(b, bigword_start_back(b.text, b.pos), b.pos, 0)
+end
+
+pub fn kill_word_back(b: Buffer) is
+    kill_range(b, word_start_back(b.text, b.pos), b.pos, 0)
+end
+
+pub fn kill_word_fwd(b: Buffer) is
+    kill_range(b, b.pos, word_end_fwd(b.text, b.pos), 1)
+end
+
+pub fn yank(b: Buffer) is
+    let n: int = b.ring.len()
+    if n == 0 is return end
+    b.yank_idx = n - 1
+    let s: string = b.ring[n - 1]
+    snapshot(b)
+    b.yank_start = b.pos
+    b.text = string_slice(b.text, 0, b.pos) + s + string_slice(b.text, b.pos, string_len(b.text))
+    b.pos += string_len(s)
+    b.yank_len = string_len(s)
+    b.last_op = "yank"
+end
+
+;; m-y: zamienia ostatnio wklejony fragment na poprzedni z ringu
+pub fn yank_pop(b: Buffer) is
+    if b.prev_op != "yank" || b.ring.len() == 0 is return end
+    let mut idx: int = b.yank_idx - 1
+    if idx < 0 is idx = b.ring.len() - 1 end
+    b.yank_idx = idx
+    let s: string = b.ring[idx]
+    b.text = string_slice(b.text, 0, b.yank_start) + s + string_slice(b.text, b.yank_start + b.yank_len, string_len(b.text))
+    b.pos = b.yank_start + string_len(s)
+    b.yank_len = string_len(s)
+    b.last_op = "yank"
+end
+
+;; --- inne ----------------------------------------------------------------
+
+pub fn transpose_chars(b: Buffer) is
+    let n: int = string_len(b.text)
+    if n < 2 is return end
+    let mut p: int = b.pos
+    if p >= n is p = utf8::prev(b.text, n) end
+    if p == 0 is return end
+    let a: int = utf8::prev(b.text, p)
+    let e: int = utf8::next(b.text, p)
+    snapshot(b)
+    b.text = string_slice(b.text, 0, a) + string_slice(b.text, p, e) + string_slice(b.text, a, p) + string_slice(b.text, e, n)
+    b.pos = e
+end
+
+fn capitalize(s: string) -> string is
+    if s == "" is return s end
+    let e: int = utf8::next(s, 0)
+    return string_upper(string_slice(s, 0, e)) + string_lower(string_slice(s, e, string_len(s)))
+end
+
+;; mode: 0 = wielkie, 1 = małe, 2 = kapitalizacja słowa
+pub fn case_word(b: Buffer, mode: int) is
+    let e: int = word_end_fwd(b.text, b.pos)
+    if e <= b.pos is return end
+    let seg: string = string_slice(b.text, b.pos, e)
+    let mut r: string = string_slice(seg, 0, string_len(seg))
+    if mode == 0 is r = string_upper(seg) end
+    if mode == 1 is r = string_lower(seg) end
+    if mode == 2 is r = capitalize(seg) end
+    snapshot(b)
+    b.text = string_slice(b.text, 0, b.pos) + r + string_slice(b.text, e, string_len(b.text))
+    b.pos = b.pos + string_len(r)
+end
+
+;; ostatnie słowo (rozdzielone spacjami) z tekstu — dla m-.
+pub fn last_arg(text: string) -> string is
+    let parts: [string] = string_split(string_trim(text), " ")
+    return parts[parts.len() - 1]
+end
