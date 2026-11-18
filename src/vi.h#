@@ -1,0 +1,597 @@
+mod utf8
+mod buffer
+
+pub struct ViState is
+    pub mode: int
+    pub count: string
+    pub op: string
+    pub wait: string
+    pub reg: string
+    pub reg_line: int
+    pub find_ch: string
+    pub find_kind: string
+end
+
+pub fn new_vi() -> ViState is
+    return ViState { mode: 0, count: "", op: "", wait: "", reg: "", reg_line: 0, find_ch: "", find_kind: "" }
+end
+
+;; klasa znaku: 0 biały, 1 słowo, 2 interpunkcja
+fn cls(text: string, p: int) -> int is
+    let c: int = utf8::bat(text, p)
+    if c == 32 || c == 9 || c == 10 is return 0 end
+    if utf8::is_word_cp(utf8::cp_at(text, p)) is return 1 end
+    return 2
+end
+
+fn cls_big(text: string, p: int) -> int is
+    let c: int = utf8::bat(text, p)
+    if c == 32 || c == 9 || c == 10 is return 0 end
+    return 1
+end
+
+fn klass(text: string, p: int, big: int) -> int is
+    if big == 1 is return cls_big(text, p) end
+    return cls(text, p)
+end
+
+fn word_next(text: string, pos: int, big: int) -> int is
+    let n: int = string_len(text)
+    if pos >= n is return n end
+    let mut p: int = pos
+    let c0: int = klass(text, p, big)
+    if c0 != 0 is
+        while p < n && klass(text, p, big) == c0 is
+            p = utf8::next(text, p)
+        end
+    end
+    while p < n && klass(text, p, big) == 0 is
+        p = utf8::next(text, p)
+    end
+    return p
+end
+
+fn word_prev(text: string, pos: int, big: int) -> int is
+    let mut p: int = pos
+    while p > 0 && klass(text, utf8::prev(text, p), big) == 0 is
+        p = utf8::prev(text, p)
+    end
+    if p == 0 is return 0 end
+    let c0: int = klass(text, utf8::prev(text, p), big)
+    while p > 0 && klass(text, utf8::prev(text, p), big) == c0 is
+        p = utf8::prev(text, p)
+    end
+    return p
+end
+
+;; początek ostatniego znaku słowa (inclusive)
+fn word_end(text: string, pos: int, big: int) -> int is
+    let n: int = string_len(text)
+    let mut p: int = utf8::next(text, pos)
+    while p < n && klass(text, p, big) == 0 is
+        p = utf8::next(text, p)
+    end
+    if p >= n is return utf8::prev(text, n) end
+    let c0: int = klass(text, p, big)
+    while utf8::next(text, p) < n && klass(text, utf8::next(text, p), big) == c0 is
+        p = utf8::next(text, p)
+    end
+    return p
+end
+
+fn first_nonblank(text: string, pos: int) -> int is
+    let mut p: int = buffer::line_start(text, pos)
+    let le: int = buffer::line_end(text, pos)
+    while p < le && (utf8::bat(text, p) == 32 || utf8::bat(text, p) == 9) is
+        p += 1
+    end
+    return p
+end
+
+fn last_char_pos(text: string, pos: int) -> int is
+    let ls: int = buffer::line_start(text, pos)
+    let le: int = buffer::line_end(text, pos)
+    if le <= ls is return ls end
+    return utf8::prev(text, le)
+end
+
+;; kursor w trybie normalnym nie stoi za ostatnim znakiem linii
+pub fn clamp(b: buffer::Buffer) is
+    let le: int = buffer::line_end(b.text, b.pos)
+    let ls: int = buffer::line_start(b.text, b.pos)
+    if b.pos >= le && le > ls is b.pos = utf8::prev(b.text, le) end
+end
+
+fn find_char(text: string, pos: int, ch: string, kind: string, count: int) -> int is
+    let ls: int = buffer::line_start(text, pos)
+    let le: int = buffer::line_end(text, pos)
+    let mut p: int = pos
+    let mut found: int = 0
+    if kind == "f" || kind == "t" is
+        let mut q: int = utf8::next(text, pos)
+        while q < le && found < count is
+            if utf8::char_at(text, q) == ch is
+                found += 1
+                p = q
+            end
+            q = utf8::next(text, q)
+        end
+        if found < count is return -1 end
+        if kind == "t" is return utf8::prev(text, p) end
+        return p
+    end
+    let mut q2: int = pos
+    while q2 > ls && found < count is
+        q2 = utf8::prev(text, q2)
+        if utf8::char_at(text, q2) == ch is
+            found += 1
+            p = q2
+        end
+    end
+    if found < count is return -1 end
+    if kind == "T" is return utf8::next(text, p) end
+    return p
+end
+
+fn is_inclusive(key: string) -> bool is
+    return key == "e" || key == "E" || key == "$" || key == "f" || key == "t"
+end
+
+;; cel ruchu lub -1 gdy to nie ruch
+fn motion(v: ViState, b: buffer::Buffer, key: string, count: int) -> int is
+    let text: string = b.text
+    let mut p: int = b.pos
+    let mut i: int = 0
+    if key == "h" || key == "backspace" is
+        while i < count && p > buffer::line_start(text, p) is
+            p = utf8::prev(text, p)
+            i += 1
+        end
+        return p
+    end
+    if key == "l" || key == " " is
+        while i < count && p < buffer::line_end(text, p) is
+            p = utf8::next(text, p)
+            i += 1
+        end
+        return p
+    end
+    if key == "0" is return buffer::line_start(text, p) end
+    if key == "^" is return first_nonblank(text, p) end
+    if key == "$" is return buffer::line_end(text, p) end
+    if key == "w" || key == "W" is
+        let mut big: int = 0
+        if key == "W" is big = 1 end
+        while i < count is
+            p = word_next(text, p, big)
+            i += 1
+        end
+        return p
+    end
+    if key == "b" || key == "B" is
+        let mut big2: int = 0
+        if key == "B" is big2 = 1 end
+        while i < count is
+            p = word_prev(text, p, big2)
+            i += 1
+        end
+        return p
+    end
+    if key == "e" || key == "E" is
+        let mut big3: int = 0
+        if key == "E" is big3 = 1 end
+        while i < count is
+            p = word_end(text, p, big3)
+            i += 1
+        end
+        return p
+    end
+    if key == "G" is return utf8::prev(text, string_len(text)) end
+    if key == "gg" is return 0 end
+    return -1
+end
+
+fn set_reg(v: ViState, s: string, linewise: int) is
+    v.reg = s
+    v.reg_line = linewise
+end
+
+;; stosuje operator na [from,to)
+fn apply_op(v: ViState, b: buffer::Buffer, op: string, from: int, to: int, linewise: int) is
+    let mut f: int = from
+    let mut t: int = to
+    if f > t is
+        let tmp: int = f
+        f = t
+        t = tmp
+    end
+    if t <= f is
+        v.op = ""
+        return
+    end
+    let seg: string = string_slice(b.text, f, t)
+    if op == "y" is
+        set_reg(v, seg, linewise)
+        b.pos = f
+    else is
+        set_reg(v, seg, linewise)
+        buffer::delete_range(b, f, t)
+        if op == "c" is v.mode = 0 end
+    end
+    v.op = ""
+end
+
+;; zakres linii bieżącej (z końcowym \n jeśli jest) dla dd/cc/yy z licznikiem
+fn line_range(b: buffer::Buffer, count: int, keep_nl: int) -> [int] is
+    let text: string = b.text
+    let from: int = buffer::line_start(text, b.pos)
+    let mut e: int = buffer::line_end(text, b.pos)
+    let mut i: int = 1
+    while i < count && e < string_len(text) is
+        e = buffer::line_end(text, e + 1)
+        i += 1
+    end
+    let mut to: int = e
+    let mut f2: int = from
+    if keep_nl == 0 is
+        if to < string_len(text) is
+            to = to + 1
+        elsif f2 > 0 is
+            f2 = f2 - 1
+        end
+    end
+    return [f2, to]
+end
+
+fn first_char(key: string) -> string is
+    return key
+end
+
+fn to_count(c: string) -> int is
+    if c == "" is return 1 end
+    let n: int = to_int(c)
+    if n < 1 is return 1 end
+    return n
+end
+
+;; kody: 0 dalej, 1 akceptuj, 2 przerwij, 3 EOF, 4 szukaj wstecz, 5 szukaj w przód, 6 historia w górę, 7 historia w dół, 9 nieobsłużone
+pub fn normal_key(v: ViState, b: buffer::Buffer, key: string) -> int is
+    let count: int = to_count(v.count)
+    ;; argument znakowy (r, f, t, F, T)
+    if v.wait == "r" is
+        v.wait = ""
+        v.count = ""
+        if utf8::char_count(key) == 1 && b.pos < buffer::line_end(b.text, b.pos) is
+            buffer::snapshot(b)
+            let e: int = utf8::next(b.text, b.pos)
+            b.text = string_slice(b.text, 0, b.pos) + key + string_slice(b.text, e, string_len(b.text))
+        end
+        return 0
+    end
+    if v.wait == "f" || v.wait == "t" || v.wait == "F" || v.wait == "T" is
+        let kind: string = string_slice(v.wait, 0, string_len(v.wait))
+        v.wait = ""
+        v.count = ""
+        if utf8::char_count(key) != 1 is
+            v.op = ""
+            return 0
+        end
+        v.find_ch = key
+        v.find_kind = kind
+        let tgt: int = find_char(b.text, b.pos, key, kind, count)
+        if tgt < 0 is
+            v.op = ""
+            return 0
+        end
+        if v.op == "" is
+            b.pos = tgt
+        else is
+            let mut to: int = tgt
+            if kind == "f" || kind == "t" is to = utf8::next(b.text, tgt) end
+            apply_op(v, b, v.op, b.pos, to, 0)
+        end
+        return 0
+    end
+    if v.wait == "g" is
+        v.wait = ""
+        if key == "g" is
+            if v.op == "" is
+                b.pos = 0
+            else is
+                apply_op(v, b, v.op, 0, buffer::line_end(b.text, b.pos), 0)
+            end
+        end
+        v.count = ""
+        return 0
+    end
+    if v.wait == "i" || v.wait == "a" is
+        let kind2: string = string_slice(v.wait, 0, string_len(v.wait))
+        v.wait = ""
+        v.count = ""
+        if key == "w" || key == "W" is
+            let mut big: int = 0
+            if key == "W" is big = 1 end
+            let n: int = string_len(b.text)
+            if b.pos >= n is
+                v.op = ""
+                return 0
+            end
+            let c0: int = klass(b.text, b.pos, big)
+            let mut s: int = b.pos
+            while s > 0 && klass(b.text, utf8::prev(b.text, s), big) == c0 is
+                s = utf8::prev(b.text, s)
+            end
+            let mut e: int = b.pos
+            while e < n && klass(b.text, e, big) == c0 is
+                e = utf8::next(b.text, e)
+            end
+            if kind2 == "a" is
+                let mut e2: int = e
+                while e2 < n && klass(b.text, e2, big) == 0 && utf8::bat(b.text, e2) != 10 is
+                    e2 = utf8::next(b.text, e2)
+                end
+                e = e2
+            end
+            apply_op(v, b, v.op, s, e, 0)
+        else is
+            v.op = ""
+        end
+        return 0
+    end
+    ;; liczniki
+    if (key >= "1" && key <= "9" && utf8::char_count(key) == 1) || (key == "0" && v.count != "") is
+        v.count = v.count + key
+        return 0
+    end
+    v.count = ""
+    ;; Esc czyści oczekujący operator
+    if key == "escape" is
+        v.op = ""
+        v.wait = ""
+        return 0
+    end
+    ;; operatory
+    if (key == "d" || key == "c" || key == "y") && v.op == "" is
+        v.op = key
+        v.count = v.count
+        if count > 1 is v.count = to_string(count) end
+        return 0
+    end
+    if v.op != "" is
+        let opn: string = string_slice(v.op, 0, string_len(v.op))
+        if key == opn is
+            let r: [int] = line_range(b, count, 0)
+            if opn == "c" is
+                let r2: [int] = line_range(b, count, 1)
+                apply_op(v, b, "c", r2[0], r2[1], 1)
+            else is
+                apply_op(v, b, opn, r[0], r[1], 1)
+            end
+            v.count = ""
+            return 0
+        end
+        if key == "f" || key == "t" || key == "F" || key == "T" || key == "g" || key == "i" || key == "a" is
+            v.wait = key
+            if count > 1 is v.count = to_string(count) end
+            return 0
+        end
+        let mut mk: string = string_slice(key, 0, string_len(key))
+        if opn == "c" && key == "w" && cls(b.text, b.pos) != 0 is mk = "e" end
+        let tgt2: int = motion(v, b, mk, count)
+        if tgt2 < 0 is
+            v.op = ""
+            return 0
+        end
+        let mut to2: int = tgt2
+        if is_inclusive(mk) is to2 = utf8::next(b.text, tgt2) end
+        apply_op(v, b, opn, b.pos, to2, 0)
+        return 0
+    end
+    ;; ruchy
+    if key == "f" || key == "t" || key == "F" || key == "T" || key == "g" is
+        v.wait = key
+        if count > 1 is v.count = to_string(count) end
+        return 0
+    end
+    if key == ";" || key == "," is
+        if v.find_ch != "" is
+            let mut kd: string = v.find_kind
+            if key == "," is
+                if kd == "f" is kd = "F" elsif kd == "F" is kd = "f" elsif kd == "t" is kd = "T" else is kd = "t" end
+            end
+            let tg: int = find_char(b.text, b.pos, v.find_ch, kd, count)
+            if tg >= 0 is b.pos = tg end
+        end
+        return 0
+    end
+    if key == "j" || key == "down" is
+        let mut moved: int = 0
+        let mut i: int = 0
+        while i < count is
+            moved += buffer::down(b)
+            i += 1
+        end
+        if moved == 0 is return 7 end
+        clamp(b)
+        return 0
+    end
+    if key == "k" || key == "up" is
+        let mut moved2: int = 0
+        let mut i2: int = 0
+        while i2 < count is
+            moved2 += buffer::up(b)
+            i2 += 1
+        end
+        if moved2 == 0 is return 6 end
+        clamp(b)
+        return 0
+    end
+    let tgt3: int = motion(v, b, key, count)
+    if tgt3 >= 0 is
+        b.pos = tgt3
+        clamp(b)
+        return 0
+    end
+    ;; zmiany
+    if key == "i" is
+        v.mode = 0
+        return 0
+    end
+    if key == "a" is
+        if b.pos < buffer::line_end(b.text, b.pos) is b.pos = utf8::next(b.text, b.pos) end
+        v.mode = 0
+        return 0
+    end
+    if key == "I" is
+        b.pos = first_nonblank(b.text, b.pos)
+        v.mode = 0
+        return 0
+    end
+    if key == "A" is
+        b.pos = buffer::line_end(b.text, b.pos)
+        v.mode = 0
+        return 0
+    end
+    if key == "o" is
+        b.pos = buffer::line_end(b.text, b.pos)
+        buffer::snapshot(b)
+        b.text = string_slice(b.text, 0, b.pos) + "\n" + string_slice(b.text, b.pos, string_len(b.text))
+        b.pos += 1
+        v.mode = 0
+        return 0
+    end
+    if key == "O" is
+        b.pos = buffer::line_start(b.text, b.pos)
+        buffer::snapshot(b)
+        b.text = string_slice(b.text, 0, b.pos) + "\n" + string_slice(b.text, b.pos, string_len(b.text))
+        v.mode = 0
+        return 0
+    end
+    if key == "x" || key == "delete" is
+        let le: int = buffer::line_end(b.text, b.pos)
+        let mut e: int = b.pos
+        let mut i3: int = 0
+        while i3 < count && e < le is
+            e = utf8::next(b.text, e)
+            i3 += 1
+        end
+        apply_op(v, b, "d", b.pos, e, 0)
+        clamp(b)
+        return 0
+    end
+    if key == "X" is
+        let ls: int = buffer::line_start(b.text, b.pos)
+        let mut s: int = b.pos
+        let mut i4: int = 0
+        while i4 < count && s > ls is
+            s = utf8::prev(b.text, s)
+            i4 += 1
+        end
+        apply_op(v, b, "d", s, b.pos, 0)
+        return 0
+    end
+    if key == "D" || key == "C" is
+        let mut o: string = "d"
+        if key == "C" is o = "c" end
+        apply_op(v, b, o, b.pos, buffer::line_end(b.text, b.pos), 0)
+        clamp(b)
+        return 0
+    end
+    if key == "s" is
+        let le2: int = buffer::line_end(b.text, b.pos)
+        let mut e3: int = b.pos
+        let mut i5: int = 0
+        while i5 < count && e3 < le2 is
+            e3 = utf8::next(b.text, e3)
+            i5 += 1
+        end
+        apply_op(v, b, "c", b.pos, e3, 0)
+        v.mode = 0
+        return 0
+    end
+    if key == "S" is
+        let r3: [int] = line_range(b, count, 1)
+        apply_op(v, b, "c", r3[0], r3[1], 1)
+        v.mode = 0
+        return 0
+    end
+    if key == "p" || key == "P" is
+        if v.reg == "" is return 0 end
+        buffer::snapshot(b)
+        if v.reg_line == 1 is
+            let mut at: int = buffer::line_end(b.text, b.pos)
+            let mut ins: string = v.reg
+            if string_ends_with(ins, "\n") is ins = string_slice(ins, 0, string_len(ins) - 1) end
+            if key == "P" is
+                at = buffer::line_start(b.text, b.pos)
+                b.text = string_slice(b.text, 0, at) + ins + "\n" + string_slice(b.text, at, string_len(b.text))
+                b.pos = at
+            else is
+                b.text = string_slice(b.text, 0, at) + "\n" + ins + string_slice(b.text, at, string_len(b.text))
+                b.pos = at + 1
+            end
+        else is
+            let mut at2: int = b.pos
+            if key == "p" && at2 < buffer::line_end(b.text, b.pos) is at2 = utf8::next(b.text, at2) end
+            let mut rep: string = ""
+            let mut i6: int = 0
+            while i6 < count is
+                rep = rep + v.reg
+                i6 += 1
+            end
+            b.text = string_slice(b.text, 0, at2) + rep + string_slice(b.text, at2, string_len(b.text))
+            b.pos = at2 + string_len(rep)
+            if b.pos > at2 is b.pos = utf8::prev(b.text, b.pos) end
+        end
+        return 0
+    end
+    if key == "u" is
+        buffer::undo(b)
+        clamp(b)
+        return 0
+    end
+    if key == "c-r" is
+        buffer::redo(b)
+        return 0
+    end
+    if key == "r" is
+        v.wait = "r"
+        return 0
+    end
+    if key == "~" is
+        if b.pos < buffer::line_end(b.text, b.pos) is
+            let e4: int = utf8::next(b.text, b.pos)
+            let ch: string = string_slice(b.text, b.pos, e4)
+            let mut sw: string = string_upper(ch)
+            if sw == ch is sw = string_lower(ch) end
+            buffer::snapshot(b)
+            b.text = string_slice(b.text, 0, b.pos) + sw + string_slice(b.text, e4, string_len(b.text))
+            b.pos = e4
+            clamp(b)
+        end
+        return 0
+    end
+    if key == "J" is
+        let le3: int = buffer::line_end(b.text, b.pos)
+        if le3 < string_len(b.text) is
+            let mut e5: int = le3 + 1
+            while e5 < string_len(b.text) && (utf8::bat(b.text, e5) == 32 || utf8::bat(b.text, e5) == 9) is
+                e5 += 1
+            end
+            buffer::snapshot(b)
+            b.text = string_slice(b.text, 0, le3) + " " + string_slice(b.text, e5, string_len(b.text))
+            b.pos = le3
+        end
+        return 0
+    end
+    if key == "enter" is return 1 end
+    if key == "c-c" is return 2 end
+    if key == "c-d" is
+        if b.text == "" is return 3 end
+        return 0
+    end
+    if key == "/" || key == "c-r" is return 4 end
+    if key == "?" is return 4 end
+    if utf8::char_count(key) == 1 is return 0 end
+    return 9
+end
