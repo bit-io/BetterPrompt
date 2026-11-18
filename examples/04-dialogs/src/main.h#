@@ -1,0 +1,14 @@
+use "bit -> BetterPrompt"
+
+fn main() is
+    betterprompt::message_dialog("Witaj", "To jest dialog wiadomości. Naciśnij Enter, aby zamknąć.", "OK")
+    let r: betterprompt::DialogResult = betterprompt::input_dialog("Imię", "Jak masz na imię?", 0, "")
+    if r.ok == 1 is
+        let c: int = betterprompt::radiolist_dialog("Kolor", "Wybierz kolor:", ["czerwony", "zielony", "niebieski"], 0)
+        let t: betterprompt::DialogResult = betterprompt::checkboxlist_dialog("Dodatki", "Zaznacz dodatki (Spacja):", ["ser", "szynka", "oliwki"], [])
+        let ok: bool = betterprompt::yes_no_dialog("Potwierdzenie", "Zapisać wybór?")
+        println("Imię=" + r.text + " kolor#=" + to_string(c) + " dodatków=" + to_string(t.selected.len()) + " zapisz=" + to_string(ok))
+    else is
+        println("Anulowano")
+    end
+end
