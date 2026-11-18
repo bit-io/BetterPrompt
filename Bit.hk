@@ -1,0 +1,13 @@
+[package]
+-> name        => betterprompt
+-> version     => 0.1.0
+-> description => BetterPrompt — biblioteka do interaktywnych promptów (inspirowana prompt_toolkit) dla H#
+-> license     => MIT
+-> lang        => h#
+
+[edition]
+-> edition   => 2026
+-> toolchain => 0.9
+
+[layout]
+-> src => src
