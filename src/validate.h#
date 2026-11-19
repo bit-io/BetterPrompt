@@ -93,6 +93,9 @@ pub fn validate(v: Validator, text: string) -> string is
         end
         return ""
     end
-    if v.kind == "custom" is return v.custom(text) end
+    if v.kind == "custom" is
+        let vf: fn(string) -> string = v.custom
+        return vf(text)
+    end
     return ""
 end
