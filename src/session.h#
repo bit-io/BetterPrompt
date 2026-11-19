@@ -306,7 +306,10 @@ fn build(s: PromptSession, final: int) -> render::Canvas is
         end
     end
     let mut tb: [style::Fragment] = s.toolbar_frags
-    if s.toolbar_dyn == 1 is tb = style::html(s.toolbar_fn(s.buf.text)) end
+    if s.toolbar_dyn == 1 is
+        let tf: fn(string) -> string = s.toolbar_fn
+        tb = style::html(tf(s.buf.text))
+    end
     if tb.len() > 0 is
         let tc: render::Canvas = render::cv_new(width)
         put_frags(s, tc, tb, "class:bottom-toolbar")
@@ -817,7 +820,8 @@ fn custom_key(s: PromptSession, key: string) -> int is
     let mut i: int = 0
     while i < s.bindings.len() is
         if s.bindings[i].keys == key is
-            let r: int = s.bindings[i].handler(s.buf)
+            let hf: fn(buffer::Buffer) -> int = s.bindings[i].handler
+            let r: int = hf(s.buf)
             if r == 1 is return 0 end
             if r == 2 is return accept_line(s) end
             if r == 3 is return 2 end
