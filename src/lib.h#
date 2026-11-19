@@ -15,7 +15,7 @@ mod dialogs
 
 
 pub fn version() -> string is
-    return "0.1.0"
+    return "0.1.1"
 end
 
 ;; ───────────────────────── Sesja i prompt ─────────────────────────
@@ -89,15 +89,15 @@ end
 
 ;; ───────────────────────── Bufor (dla własnych skrótów) ─────────────────────────
 
-pub fn buffer_insert(b: buffer::Buffer, text: string) is
+pub fn buf_insert(b: buffer::Buffer, text: string) is
     buffer::insert(b, text)
 end
 
-pub fn buffer_set_text(b: buffer::Buffer, text: string, pos: int) is
+pub fn buf_set_text(b: buffer::Buffer, text: string, pos: int) is
     buffer::set_text(b, text, pos)
 end
 
-pub fn buffer_delete_back(b: buffer::Buffer, n: int) is
+pub fn buf_delete_back(b: buffer::Buffer, n: int) is
     buffer::delete_back(b, n)
 end
 
@@ -273,4 +273,28 @@ end
 
 pub fn progress_finish(pb: progress::ProgressBar) is
     progress::progress_finish(pb)
+end
+
+;; ───────────────────────── (0.1.1) Dodatki publiczne ─────────────────────────
+
+;; Szerokosc napisu w komorkach terminala (znaki szerokie/emoji = 2, ANSI nie jest brane pod uwage).
+pub fn str_width(text: string) -> int is
+    return utf8::str_width(text)
+end
+
+;; Liczba kolumn terminala (ioctl TIOCGWINSZ, potem $COLUMNS, domyslnie 80).
+pub fn terminal_width() -> int is
+    let t: term::Term = term::new_term()
+    term::refresh_size(t)
+    return t.cols
+end
+
+;; Uruchamia polecenie w `sh -c` z pelnym dostepem do terminala i zwraca kod wyjscia
+;; (jak `$?`: 128+N, gdy proces zginal od sygnalu N). Wolac PO zakonczeniu `prompt` —
+;; wtedy terminal jest juz w trybie cooked.
+pub fn run_command(cmd: string) -> int is
+    let st: int = term::run_interactive(cmd)
+    let sig: int = st % 128
+    if sig != 0 is return 128 + sig end
+    return (st / 256) % 256
 end
