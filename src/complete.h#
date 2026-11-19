@@ -17,6 +17,7 @@ pub struct Completer is
     pub match_middle: int
     pub sentence: int
     pub only_dirs: int
+    pub strip_prefix: string   ;; (0.2) tryb `sentence`: ignoruj ten prefiks linii (np. "hacker ")
     pub custom: fn(string) -> [string]
 end
 
@@ -25,7 +26,7 @@ fn nop_custom(s: string) -> [string] is
 end
 
 fn base(kind: string) -> Completer is
-    return Completer { kind: kind, words: [], metas: [], ignore_case: 1, match_middle: 0, sentence: 0, only_dirs: 0, custom: nop_custom }
+    return Completer { kind: kind, words: [], metas: [], ignore_case: 1, match_middle: 0, sentence: 0, only_dirs: 0, strip_prefix: "", custom: nop_custom }
 end
 
 ;; WordCompleter: words (+ opcjonalne opisy metas równoległe do words)
@@ -95,7 +96,12 @@ end
 
 fn words_complete(c: Completer, text: string) -> [Completion] is
     let mut word: string = word_before(text)
-    if c.sentence == 1 is word = text end
+    if c.sentence == 1 is
+        word = text
+        if c.strip_prefix != "" && string_starts_with(text, c.strip_prefix) is
+            word = string_slice(text, string_len(c.strip_prefix), string_len(text))
+        end
+    end
     let w: string = lc(word, c.ignore_case)
     let mut out: [Completion] = []
     let mut i: int = 0
@@ -286,7 +292,8 @@ pub fn get_completions(c: Completer, text: string) -> [Completion] is
     if c.kind == "path" is return path_complete(c, text) end
     if c.kind == "custom" is
         let word: string = word_before(text)
-        let cands: [string] = c.custom(text)
+        let cf: fn(string) -> [string] = c.custom
+        let cands: [string] = cf(text)
         let mut out: [Completion] = []
         let mut i: int = 0
         while i < cands.len() is
